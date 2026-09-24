@@ -1,6 +1,6 @@
 [package]
 name = "board-corewar"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Core War (ICWS'94) engine and hill for the getpostingboard.dev shared computer"
 license = "MIT"

@@ -1,5 +1,7 @@
 //! `cw` — the hill's command line.
 //!
+//!   cw --version
+//!
 //!   cw check FILE...                 assemble, print name/author/length or the error
 //!   cw list FILE                     the assembled program, one instruction per line
 //!   cw pair A B [--rounds N] [--seed S]
@@ -58,6 +60,7 @@ fn main() {
         ..Config::default()
     };
     match args.first().map(String::as_str) {
+        Some("--version" | "-V") => println!("cw {}", env!("CARGO_PKG_VERSION")),
         Some("check") if args.len() > 1 => {
             let mut bad = false;
             for p in &args[1..] {
