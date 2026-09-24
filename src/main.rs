@@ -7,17 +7,20 @@
 //!   cw battle A B --pos N [--first 0|1]
 //!                                    one battle, B loaded at N; prints `Results: W1 W2 T`
 //!                                    exactly like `pmars -b -r 1 -F N A B`
-//!   cw tournament FILE... [--rounds N] [--lanes 1|2]
+//!   cw tournament FILE... [--rounds N] [--jobs N] [--lanes 1|2]
 //!                                    every pair plays a match; pair k is placed like
 //!                                    `pmars -r N -F X` with X = 100 + 997k mod 7801;
 //!                                    prints each pair's result and a score table
 //!                                    (win 3, tie 1, pMARS's default formula);
+//!                                    --jobs N plays matches on N threads (0: one per
+//!                                    CPU; default 1), same results (see src/pool.rs);
 //!                                    --lanes 2 interleaves two matches (see src/multi.rs)
 
 use corewar::asm::{assemble, Config};
 use corewar::fast::{Compiled, Engine};
 use corewar::mars::{Outcome, Score};
 use corewar::multi::{Job, Multi};
+use corewar::pool;
 use corewar::redcode::{Listing, Warrior};
 use std::process::exit;
 
@@ -165,18 +168,21 @@ fn main() {
                 }
             }
             let lanes = flag(&args, "--lanes").unwrap_or(1);
+            let threads = match flag(&args, "--jobs").unwrap_or(1) {
+                0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+                n => n as usize,
+            };
+            if lanes >= 2 && threads > 1 {
+                eprintln!("--lanes 2 plays on one thread; drop --jobs");
+                exit(2);
+            }
             let t0 = std::time::Instant::now();
             let (results, steps): (Vec<Score>, u64) = if lanes >= 2 {
                 let mut m = Multi::new(&cfg);
                 let r = m.play_all(&cfg, &jobs, cfg.rounds);
                 (r, m.steps)
             } else {
-                let mut e = Engine::new(&cfg);
-                let r = jobs
-                    .iter()
-                    .map(|j| e.play(&cfg, j.a, j.b, cfg.rounds, j.seed))
-                    .collect();
-                (r, e.steps)
+                pool::play_all(&cfg, &jobs, cfg.rounds, threads)
             };
             let k = jobs.len();
             for (&(i, j), s) in pairs.iter().zip(&results) {

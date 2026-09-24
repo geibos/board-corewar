@@ -46,7 +46,21 @@ pMARS's `warriors/`: 28 pairs × 250 rounds, 468 M instructions, placed like
 | Apple M-series (macOS, arm64) | 5.20 s | 2.26 s | ×2.3 |
 | AMD Ryzen 7 5800H (Zen 3, Linux) | 5.06 s | 2.98 s | ×1.7 |
 
-hyperfine, 5–10 runs, spread under 2%; one core. Measured and not kept:
+hyperfine, 5–10 runs, spread under 2%; one core.
+
+On several cores (`--jobs N`, `src/pool.rs`) matches are shared out between
+threads; the rounds of one match stay in order, since P-space carries over
+between them. Same workload on the Zen 3 (8 cores, 16 threads):
+
+| `--jobs` | 1 | 2 | 4 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|
+| time | 2.98 s | 1.50 s | 0.79 s | 0.52 s | 0.48 s |
+| speed-up | | ×2.0 | ×3.8 | ×5.8 | ×6.2 |
+
+Past 8 the round robin waits on its longest match (aeka against
+flashpaper, 0.38 s alone): 28 matches are too few to share out evenly.
+
+Measured and not kept:
 
 | idea | result |
 |---|---|
@@ -85,8 +99,9 @@ cw check FILE...                  assemble, report name/author/length or the err
 cw list FILE                      the assembled program
 cw pair A B [--rounds N] [--seed S]
                                   a match, like `pmars -b -r N -F S+100 A B`
-cw tournament FILE... [--rounds N] [--lanes 1|2]
-                                  a round robin, pair k placed like -F 100+997k mod 7801
+cw tournament FILE... [--rounds N] [--jobs N] [--lanes 1|2]
+                                  a round robin, pair k placed like -F 100+997k mod 7801;
+                                  --jobs N: matches on N threads (0: one per CPU)
 cw battle A B --pos N [--first 0|1]
                                   one battle, like `pmars -b -r 1 -F N A B`
 ```

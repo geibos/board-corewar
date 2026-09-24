@@ -164,3 +164,46 @@ mod multi_vs_sequential {
         }
     }
 }
+
+mod pool_vs_sequential {
+    use super::common::{render, warrior_of};
+    use corewar::asm::{assemble, Config};
+    use corewar::fast::{Compiled, Engine};
+    use corewar::multi::Job;
+    use corewar::pool;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 300, ..ProptestConfig::default() })]
+
+        /// Playing matches on several threads changes nothing: scores come
+        /// back in job order and equal playing them one after another, and
+        /// the instruction count is the same.
+        #[test]
+        fn threaded_equals_sequential(
+            ws in prop::collection::vec(warrior_of(12), 2..8),
+            rounds in 1u32..5,
+            cycles in prop_oneof![1u32..40, 1u32..3000, Just(80_000u32)],
+            procs in prop_oneof![1u32..8, Just(8000u32)],
+            threads in 1usize..9,
+        ) {
+            let cfg = Config { max_cycles: cycles, max_processes: procs, rounds, ..Config::default() };
+            let compiled: Vec<Compiled> = ws
+                .iter()
+                .enumerate()
+                .map(|(k, (c, s))| Compiled::new(&assemble(&render(&format!("w{}", k), c, *s), &cfg).unwrap()))
+                .collect();
+            let mut jobs = Vec::new();
+            for i in 0..compiled.len() {
+                for j in i + 1..compiled.len() {
+                    jobs.push(Job { a: &compiled[i], b: &compiled[j], seed: (jobs.len() as i32) * 977 + 1 });
+                }
+            }
+            let (got, steps) = pool::play_all(&cfg, &jobs, rounds, threads);
+            let mut seq = Engine::new(&cfg);
+            let want: Vec<_> = jobs.iter().map(|j| seq.play(&cfg, j.a, j.b, rounds, j.seed)).collect();
+            prop_assert_eq!(got, want);
+            prop_assert_eq!(steps, seq.steps);
+        }
+    }
+}
