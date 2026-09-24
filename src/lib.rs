@@ -2,4 +2,5 @@
 pub mod asm;
 pub mod fast;
 pub mod mars;
+pub mod multi;
 pub mod redcode;

@@ -205,7 +205,7 @@ impl Compiled {
 /// alias, so queue heads and lengths, the core base and its size can live
 /// in registers instead of being reloaded from the engine after every store
 /// into the core (which is what the profile showed before).
-struct Run<'a> {
+pub(crate) struct Run<'a> {
     core: &'a mut [Cell],
     qbuf: [&'a mut [u16]; 2],
     head: [usize; 2],
@@ -220,6 +220,12 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// Queue heads and lengths, to park between segments of a round.
+    #[inline(always)]
+    pub(crate) fn queues(&self) -> ([usize; 2], [usize; 2]) {
+        (self.head, self.len)
+    }
+
     #[inline(always)]
     fn pop<const W: usize>(&mut self) -> u16 {
         let h = self.head[W];
@@ -325,7 +331,7 @@ impl Run<'_> {
 
     /// One instruction of warrior `w`; false if it has no processes after.
     #[inline(always)]
-    fn step<const W: usize>(&mut self) -> bool {
+    pub(crate) fn step<const W: usize>(&mut self) -> bool {
         let cs = self.cs;
         let pc = self.pop::<W>() as u32;
         let ir = self.cell(pc);
@@ -559,7 +565,8 @@ impl Run<'_> {
     /// Play until one warrior has no processes or `budget` instructions have
     /// run; unrolled by pairs so each step knows its warrior at compile time.
     /// Returns the outcome and the number of instructions executed.
-    fn run(&mut self, budget: u64, first: usize) -> (Outcome, u64) {
+    #[inline(always)]
+    pub(crate) fn run(&mut self, budget: u64, first: usize) -> (Outcome, u64) {
         let mut steps = budget;
         if first == 1 {
             if steps == 0 {
@@ -596,6 +603,9 @@ pub struct Engine {
     qbuf: [Box<[u16]>; 2],
     mask: usize,
     start_pc: [u16; 2],
+    /// Queue state between segments of a round (see `crate::multi`).
+    head: [usize; 2],
+    len: [usize; 2],
     pspace: Vec<Vec<u16>>,
     bank: [usize; 2],
     last_result: [u16; 2],
@@ -621,6 +631,8 @@ impl Engine {
             ],
             mask: cap - 1,
             start_pc: [0; 2],
+            head: [0; 2],
+            len: [0; 2],
             pspace: vec![vec![0; ps as usize]; 2],
             bank: [0, 1],
             last_result: [(cfg.core_size - 1) as u16; 2],
@@ -657,22 +669,24 @@ impl Engine {
         }
     }
 
-    pub fn round(
-        &mut self,
-        cfg: &Config,
-        w: [&Compiled; 2],
-        pos: [u32; 2],
-        first: usize,
-    ) -> Outcome {
+    /// Load a round: core cleared, warriors placed, one process each.
+    pub(crate) fn start_round(&mut self, w: [&Compiled; 2], pos: [u32; 2]) {
         self.load(w, pos);
+        self.qbuf[0][0] = self.start_pc[0];
+        self.qbuf[1][0] = self.start_pc[1];
+        self.head = [0, 0];
+        self.len = [1, 1];
+    }
+
+    /// The hot-loop view of this engine's current round.
+    #[inline(always)]
+    pub(crate) fn view(&mut self) -> Run<'_> {
         let [q0, q1] = &mut self.qbuf;
-        q0[0] = self.start_pc[0];
-        q1[0] = self.start_pc[1];
-        let mut run = Run {
+        Run {
             core: &mut self.core,
             qbuf: [&mut q0[..], &mut q1[..]],
-            head: [0, 0],
-            len: [1, 1],
+            head: self.head,
+            len: self.len,
             mask: self.mask,
             cs: self.cs,
             max_processes: self.max_processes,
@@ -680,8 +694,18 @@ impl Engine {
             bank: self.bank,
             last_result: &mut self.last_result,
             pspace_size: self.pspace_size,
-        };
-        let (outcome, executed) = run.run(cfg.max_cycles as u64 * 2, first);
+        }
+    }
+
+    /// Keep a view's queue state for the next segment of the round.
+    #[inline(always)]
+    pub(crate) fn park(&mut self, head: [usize; 2], len: [usize; 2]) {
+        self.head = head;
+        self.len = len;
+    }
+
+    /// Record a round's result for P-space cell 0 of the next round.
+    pub(crate) fn finish_round(&mut self, outcome: Outcome, executed: u64) {
         // Counted per round rather than per instruction: the hot loop stays lean.
         self.steps += executed;
         match outcome {
@@ -691,6 +715,18 @@ impl Engine {
             }
             Outcome::Tie => self.last_result = [2, 2],
         }
+    }
+
+    pub fn round(
+        &mut self,
+        cfg: &Config,
+        w: [&Compiled; 2],
+        pos: [u32; 2],
+        first: usize,
+    ) -> Outcome {
+        self.start_round(w, pos);
+        let (outcome, executed) = self.view().run(cfg.max_cycles as u64 * 2, first);
+        self.finish_round(outcome, executed);
         outcome
     }
 
