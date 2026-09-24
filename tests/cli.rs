@@ -248,3 +248,14 @@ fn list_json_is_the_listing() {
     assert_eq!(code, lines.collect::<Vec<_>>());
     assert_eq!(j["warrior"]["length"], 4);
 }
+
+#[test]
+fn check_refuses_an_oversized_file_without_assembling_it() {
+    let big = std::env::temp_dir().join(format!("cw-big-{}.red", std::process::id()));
+    std::fs::write(&big, ";".repeat(corewar::asm::MAX_SOURCE_BYTES + 1)).unwrap();
+    let o = cw(&["check", big.to_str().unwrap(), "--json"]);
+    let _ = std::fs::remove_file(&big);
+    assert_eq!(o.status.code(), Some(1));
+    let j: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(j[0]["error"].as_str().unwrap().contains("bytes"), "{}", j);
+}

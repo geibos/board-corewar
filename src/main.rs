@@ -157,7 +157,7 @@ fn main() {
             let checked: Vec<report::Checked> = files
                 .iter()
                 .map(|p| {
-                    let r = std::fs::read_to_string(p)
+                    let r = corewar::asm::read_source(p.as_ref())
                         .map_err(|e| e.to_string())
                         .and_then(|s| assemble(&s, &cfg).map_err(|e| e.to_string()));
                     report::Checked::new(p, r)
