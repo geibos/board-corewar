@@ -122,3 +122,129 @@ fn battle_position_is_at_least_the_distance() {
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("cannot be smaller than warrior distance"));
 }
+
+fn json(args: &[&str]) -> serde_json::Value {
+    let mut all = args.to_vec();
+    all.push("--json");
+    let o = cw(&all);
+    assert!(o.status.success(), "{:?}", o);
+    serde_json::from_slice(&o.stdout).expect("stdout is one JSON document")
+}
+
+const TRIO: [&str; 3] = [
+    "testdata/dwarf.red",
+    "testdata/imp.red",
+    "testdata/registers.red",
+];
+
+#[test]
+fn tournament_json_matches_the_text() {
+    let mut args = vec!["tournament"];
+    args.extend(TRIO);
+    args.extend(["--rounds", "20"]);
+    let text = stdout(&cw(&args));
+    let j = json(&args);
+    assert_eq!(j["params"]["core_size"], 8000);
+    assert_eq!(j["params"]["distance"], 100);
+    assert_eq!(j["params"]["rounds"], 20);
+    let ws = j["warriors"].as_array().unwrap();
+    assert_eq!(ws.len(), 3);
+    assert_eq!(ws[0]["file"], "testdata/dwarf.red");
+    assert_eq!(ws[0]["name"], "Dwarf");
+    let ms = j["matches"].as_array().unwrap();
+    assert_eq!(ms.len(), 3);
+    for (m, line) in ms.iter().zip(text.lines()) {
+        let (a, b) = (
+            m["a"].as_u64().unwrap() as usize,
+            m["b"].as_u64().unwrap() as usize,
+        );
+        let r = &m["result"];
+        let want = format!(
+            "{} vs {}: Results: {} {} {}",
+            TRIO[a], TRIO[b], r["w1"], r["w2"], r["ties"]
+        );
+        assert_eq!(line, want);
+    }
+    let st = j["standings"].as_array().unwrap();
+    assert_eq!(st.len(), 3);
+    let scores: Vec<u64> = st.iter().map(|s| s["score"].as_u64().unwrap()).collect();
+    assert!(scores.windows(2).all(|w| w[0] >= w[1]), "{:?}", scores);
+    assert_eq!(st[0]["place"], 1);
+    assert!(j["stats"]["instructions"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn pair_and_battle_json_match_the_text() {
+    let args = [
+        "pair",
+        "testdata/imp.red",
+        "testdata/registers.red",
+        "--rounds",
+        "10",
+        "--seed",
+        "3900",
+    ];
+    let j = json(&args);
+    assert_eq!(
+        j["result"],
+        serde_json::json!({"w1": 0, "w2": 0, "ties": 10})
+    );
+    assert_eq!(j["seed"], 3900);
+    assert_eq!(j["warriors"][1]["name"], "registers");
+    let args = [
+        "battle",
+        "testdata/imp.red",
+        "testdata/registers.red",
+        "--pos",
+        "4000",
+    ];
+    let j = json(&args);
+    assert_eq!(
+        j["result"],
+        serde_json::json!({"w1": 0, "w2": 0, "ties": 1})
+    );
+    assert_eq!(j["pos"], 4000);
+}
+
+#[test]
+fn check_json_reports_each_file() {
+    let bad = std::env::temp_dir().join(format!("cw-bad-{}.red", std::process::id()));
+    std::fs::write(&bad, "MOV 0, 1\nFOO 1\n").unwrap();
+    let o = cw(&[
+        "check",
+        "testdata/dwarf.red",
+        bad.to_str().unwrap(),
+        "--json",
+    ]);
+    let _ = std::fs::remove_file(&bad);
+    assert_eq!(o.status.code(), Some(1));
+    let j: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let rs = j.as_array().unwrap();
+    assert_eq!(rs[0]["ok"], true);
+    assert_eq!(rs[0]["length"], 4);
+    // Each key once: serde_json would keep the last of two silently.
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout)
+            .matches("\"file\"")
+            .count(),
+        2
+    );
+    assert_eq!(rs[1]["ok"], false);
+    assert!(!rs[1]["error"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn list_json_is_the_listing() {
+    let text = stdout(&cw(&["list", "testdata/dwarf.red"]));
+    let j = json(&["list", "testdata/dwarf.red"]);
+    let mut lines = text.lines();
+    assert_eq!(lines.next().unwrap(), format!("ORG {}", j["start"]));
+    let code: Vec<&str> = j["code"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert_eq!(code, lines.collect::<Vec<_>>());
+    assert_eq!(j["warrior"]["length"], 4);
+}

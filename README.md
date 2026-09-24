@@ -126,6 +126,22 @@ is refused with exit code 2, as pMARS refuses it):
 `cli_parameters_like_pmars` in `tests/pmars_diff.rs` plays random
 parameter sets, invalid ones included, through `cw pair` and `pmars -b`.
 
+`--json` prints one JSON document instead of the text: the same facts,
+warriors referred to by their index. The shapes are the structs in
+`src/report.rs`; `stats` (instructions, seconds) is the only part that
+differs between runs. A round robin, abridged:
+
+```json
+{
+  "params": { "core_size": 8000, "cycles": 80000, "processes": 8000,
+              "length": 100, "distance": 100, "rounds": 250 },
+  "warriors": [ { "file": "dwarf.red", "name": "Dwarf", "author": "A. K. Dewdney", "length": 4 }, ... ],
+  "matches": [ { "a": 0, "b": 1, "seed": 0, "result": { "w1": 250, "w2": 0, "ties": 0 } }, ... ],
+  "standings": [ { "place": 1, "warrior": 0, "score": 750 }, ... ],
+  "stats": { "instructions": 468096011, "seconds": 2.98 }
+}
+```
+
 ## Redcode accepted
 
 Everything pMARS 0.9.2 accepts with ICWS'94 extensions, the way pMARS

@@ -9,6 +9,7 @@ use corewar::mars::{Outcome, Score};
 use corewar::multi::{Job, Multi};
 use corewar::pool;
 use corewar::redcode::{Listing, Warrior};
+use corewar::report::{self, Params as ParamsReport, Stats, WarriorInfo};
 use std::process::exit;
 
 #[derive(Parser)]
@@ -16,6 +17,13 @@ use std::process::exit;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Print one JSON document instead of text.
+    #[arg(long, global = true)]
+    json: bool,
+}
+
+fn print_json<T: serde::Serialize>(v: &T) {
+    println!("{}", serde_json::to_string_pretty(v).expect("serialize"));
 }
 
 #[derive(Subcommand)]
@@ -141,41 +149,56 @@ fn load(path: &str, cfg: &Config) -> Warrior {
 }
 
 fn main() {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let json = cli.json;
+    match cli.command {
         Command::Check { files, params } => {
             let cfg = params.config(1);
-            let mut bad = false;
-            for p in &files {
-                match std::fs::read_to_string(p).map(|s| assemble(&s, &cfg)) {
-                    Ok(Ok(w)) => println!(
-                        "{}: ok, \"{}\" by {}, {} instructions",
-                        p,
-                        w.name,
-                        w.author,
-                        w.code.len()
-                    ),
-                    Ok(Err(e)) => {
-                        println!("{}: {}", p, e);
-                        bad = true;
-                    }
-                    Err(e) => {
-                        println!("{}: {}", p, e);
-                        bad = true;
+            let checked: Vec<report::Checked> = files
+                .iter()
+                .map(|p| {
+                    let r = std::fs::read_to_string(p)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| assemble(&s, &cfg).map_err(|e| e.to_string()));
+                    report::Checked::new(p, r)
+                })
+                .collect();
+            if json {
+                print_json(&checked);
+            } else {
+                for c in &checked {
+                    match &c.error {
+                        None => println!(
+                            "{}: ok, \"{}\" by {}, {} instructions",
+                            c.file,
+                            c.name.as_deref().unwrap_or_default(),
+                            c.author.as_deref().unwrap_or_default(),
+                            c.length.unwrap_or_default()
+                        ),
+                        Some(e) => println!("{}: {}", c.file, e),
                     }
                 }
             }
-            exit(bad as i32);
+            exit(checked.iter().any(|c| !c.ok) as i32);
         }
         Command::List { file, params } => {
             let cfg = params.config(1);
             let w = load(&file, &cfg);
-            print!(
-                "{}",
-                Listing {
-                    warrior: &w,
-                    core_size: cfg.core_size
-                }
-            );
+            let listing = Listing {
+                warrior: &w,
+                core_size: cfg.core_size,
+            }
+            .to_string();
+            if json {
+                print_json(&report::Listed {
+                    warrior: WarriorInfo::new(&file, &w),
+                    start: w.start,
+                    // The first line is ORG, given as `start`.
+                    code: listing.lines().skip(1).map(str::to_owned).collect(),
+                });
+            } else {
+                print!("{}", listing);
+            }
         }
         Command::Pair {
             a,
@@ -185,12 +208,25 @@ fn main() {
             params,
         } => {
             let cfg = params.config(rounds);
-            let a = Compiled::new(&load(&a, &cfg));
-            let b = Compiled::new(&load(&b, &second(&cfg)));
+            let (wa, wb) = (load(&a, &cfg), load(&b, &second(&cfg)));
+            let (ca, cb) = (Compiled::new(&wa), Compiled::new(&wb));
             let mut mars = Engine::new(&cfg);
             let t0 = std::time::Instant::now();
-            let s = mars.play(&cfg, &a, &b, rounds, seed as i32);
+            let s = mars.play(&cfg, &ca, &cb, rounds, seed as i32);
             let dt = t0.elapsed().as_secs_f64();
+            if json {
+                print_json(&report::Pair {
+                    params: ParamsReport::from(&cfg),
+                    warriors: [WarriorInfo::new(&a, &wa), WarriorInfo::new(&b, &wb)],
+                    seed,
+                    result: s,
+                    stats: Stats {
+                        instructions: mars.steps,
+                        seconds: dt,
+                    },
+                });
+                return;
+            }
             println!("Results: {} {} {}", s.w1, s.w2, s.ties);
             eprintln!(
                 "{} rounds, {} instructions, {:.3} s, {:.1} M instructions/s",
@@ -216,15 +252,25 @@ fn main() {
                 );
                 exit(2);
             }
-            let a = Compiled::new(&load(&a, &cfg));
-            let b = Compiled::new(&load(&b, &second(&cfg)));
+            let (wa, wb) = (load(&a, &cfg), load(&b, &second(&cfg)));
+            let (ca, cb) = (Compiled::new(&wa), Compiled::new(&wb));
             let mut mars = Engine::new(&cfg);
-            let (w1, w2, t) = match mars.battle(&cfg, [&a, &b], [0, pos], first as usize) {
+            let (w1, w2, ties) = match mars.battle(&cfg, [&ca, &cb], [0, pos], first as usize) {
                 Outcome::Win(0) => (1, 0, 0),
                 Outcome::Win(_) => (0, 1, 0),
                 Outcome::Tie => (0, 0, 1),
             };
-            println!("Results: {} {} {}", w1, w2, t);
+            if json {
+                print_json(&report::Battle {
+                    params: ParamsReport::from(&cfg),
+                    warriors: [WarriorInfo::new(&a, &wa), WarriorInfo::new(&b, &wb)],
+                    pos,
+                    first,
+                    result: Score { w1, w2, ties },
+                });
+                return;
+            }
+            println!("Results: {} {} {}", w1, w2, ties);
         }
         Command::Tournament {
             files,
@@ -242,12 +288,12 @@ fn main() {
                 eprintln!("error: --lanes 2 plays on one thread; drop --jobs");
                 exit(2);
             }
-            tournament(&cfg, &files, threads, lanes == 2);
+            tournament(&cfg, &files, threads, lanes == 2, json);
         }
     }
 }
 
-fn tournament(cfg: &Config, files: &[String], threads: usize, lanes: bool) {
+fn tournament(cfg: &Config, files: &[String], threads: usize, lanes: bool, json: bool) {
     let named: Vec<(Warrior, Compiled, Compiled)> = files
         .iter()
         .map(|f| {
@@ -282,17 +328,55 @@ fn tournament(cfg: &Config, files: &[String], threads: usize, lanes: bool) {
     } else {
         pool::play_all(cfg, &jobs, cfg.rounds, threads)
     };
+    let dt = t0.elapsed().as_secs_f64();
+    for (&(i, j), s) in pairs.iter().zip(&results) {
+        score[i] += 3 * s.w1 as u64 + s.ties as u64;
+        score[j] += 3 * s.w2 as u64 + s.ties as u64;
+    }
+    // Stable: equal scores keep the order of the command line.
+    let mut order: Vec<usize> = (0..ws.len()).collect();
+    order.sort_by(|&x, &y| score[y].cmp(&score[x]));
+    if json {
+        print_json(&report::Tournament {
+            params: ParamsReport::from(cfg),
+            warriors: files
+                .iter()
+                .zip(&named)
+                .map(|(f, (w, _, _))| WarriorInfo::new(f, w))
+                .collect(),
+            matches: pairs
+                .iter()
+                .zip(&jobs)
+                .zip(&results)
+                .map(|((&(a, b), job), &result)| report::Match {
+                    a,
+                    b,
+                    seed: job.seed as u32,
+                    result,
+                })
+                .collect(),
+            standings: order
+                .iter()
+                .enumerate()
+                .map(|(place, &i)| report::Standing {
+                    place: place + 1,
+                    warrior: i,
+                    score: score[i],
+                })
+                .collect(),
+            stats: Stats {
+                instructions: steps,
+                seconds: dt,
+            },
+        });
+        return;
+    }
     for (&(i, j), s) in pairs.iter().zip(&results) {
         println!(
             "{} vs {}: Results: {} {} {}",
             files[i], files[j], s.w1, s.w2, s.ties
         );
-        score[i] += 3 * s.w1 as u64 + s.ties as u64;
-        score[j] += 3 * s.w2 as u64 + s.ties as u64;
     }
-    let dt = t0.elapsed().as_secs_f64();
-    let mut order: Vec<usize> = (0..ws.len()).collect();
-    order.sort_by(|&x, &y| score[y].cmp(&score[x]));
     for (place, &i) in order.iter().enumerate() {
         println!(
             "{:3}. {:8} {} ({})",

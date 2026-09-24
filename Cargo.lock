@@ -110,6 +110,8 @@ dependencies = [
  "clap",
  "criterion",
  "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

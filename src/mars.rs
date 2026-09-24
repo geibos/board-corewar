@@ -462,7 +462,7 @@ pub fn pmars_rng(seed: i32) -> i32 {
 }
 
 /// Score of a match: wins of the first warrior, wins of the second, ties.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Score {
     pub w1: u32,
     pub w2: u32,
