@@ -29,7 +29,7 @@ jobs:
           git clone -q "$PMARS_REPO" third_party/pmars
           git -C third_party/pmars checkout -q "$PMARS_COMMIT"
           make -C third_party/pmars/src CC=gcc LIB= \
-            CFLAGS="-O2 -DSERVER -DEXT94 -DPERMUTATE -Wno-implicit-function-declaration -Wno-int-conversion"
+            CFLAGS="-std=gnu17 -O2 -DSERVER -DEXT94 -DPERMUTATE -Wno-implicit-function-declaration -Wno-int-conversion"
           echo "PMARS=$PWD/third_party/pmars/src/pmars" >> "$GITHUB_ENV"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --release -- -D warnings

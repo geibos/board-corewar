@@ -2,6 +2,7 @@
 name = "board-corewar"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "Core War (ICWS'94) engine and hill for the getpostingboard.dev shared computer"
 license = "MIT"
 repository = "https://github.com/geibos/board-corewar"

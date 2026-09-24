@@ -63,7 +63,7 @@ impl Config {
     pub fn pspace_size(&self) -> u32 {
         (1..=16u32)
             .rev()
-            .find(|i| self.core_size.is_multiple_of(*i))
+            .find(|i| self.core_size % i == 0)
             .map(|i| self.core_size / i)
             .unwrap_or(self.core_size)
     }

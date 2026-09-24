@@ -19,7 +19,7 @@ it is not part of this repository and is used only as a test oracle.
 ```sh
 git clone --depth 1 https://github.com/mbarbon/pMARS third_party/pmars
 make -C third_party/pmars/src CC=cc LIB= \
-  CFLAGS="-O2 -DSERVER -DEXT94 -DPERMUTATE -Wno-implicit-function-declaration -Wno-int-conversion"
+  CFLAGS="-std=gnu17 -O2 -DSERVER -DEXT94 -DPERMUTATE -Wno-implicit-function-declaration -Wno-int-conversion"
 export PMARS=$PWD/third_party/pmars/src/pmars
 ```
 
