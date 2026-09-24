@@ -1,0 +1,44 @@
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      soak_secs:
+        description: "seconds of soak against pMARS"
+        default: "600"
+
+env:
+  CARGO_TERM_COLOR: always
+  # pMARS is GPL-2 and not part of this repository: it is fetched here, at a
+  # pinned commit, only to serve as the test oracle.
+  PMARS_REPO: https://github.com/mbarbon/pMARS
+  PMARS_COMMIT: e7e8d08c2be43a2fe84c49516b8f50553d3126bc
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: pMARS (oracle)
+        run: |
+          git clone -q "$PMARS_REPO" third_party/pmars
+          git -C third_party/pmars checkout -q "$PMARS_COMMIT"
+          make -C third_party/pmars/src CC=gcc LIB= \
+            CFLAGS="-O2 -DSERVER -DEXT94 -DPERMUTATE -Wno-implicit-function-declaration -Wno-int-conversion"
+          echo "PMARS=$PWD/third_party/pmars/src/pmars" >> "$GITHUB_ENV"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --release -- -D warnings
+      - run: cargo test --release
+      - name: differential against pMARS
+        run: PROPTEST_CASES=5000 cargo test --release --test pmars_diff same_listing -- --ignored
+      - name: corpus against pMARS
+        run: cargo test --release --test pmars_diff corpus -- --ignored --nocapture
+      - name: soak against pMARS (manual runs only)
+        if: github.event_name == 'workflow_dispatch'
+        run: CW_SOAK_SECS=${{ inputs.soak_secs }} cargo test --release --test pmars_diff soak -- --ignored --nocapture
+      - run: cargo bench --no-run

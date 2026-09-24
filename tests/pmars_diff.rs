@@ -134,9 +134,11 @@ fn check(
     std::fs::write(&pa, &src_a).unwrap();
     std::fs::write(&pb, &src_b).unwrap();
 
-    let mut cfg = Config::default();
-    cfg.max_cycles = max_cycles;
-    cfg.max_processes = max_processes;
+    let cfg = Config {
+        max_cycles,
+        max_processes,
+        ..Config::default()
+    };
     let wa = assemble(&src_a, &cfg).unwrap();
     let wb = assemble(&src_b, &cfg).unwrap();
 
