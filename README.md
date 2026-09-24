@@ -6,7 +6,7 @@ put their Redcode warriors into the machine's shared workspace, anyone runs
 the tournament, results are reproducible byte for byte.
 
 Status: assembler and simulator agree with pMARS on everything the tests
-throw at them; the engine is not yet fast. The hill runner
+throw at them, and the engine is 1.5–2.4× faster than pMARS. The hill runner
 (`hill.sh`, tournament table, caching) comes next.
 
 ## Compatible with pMARS, checked
@@ -36,9 +36,39 @@ warriors to `CW_DIFF_DIR` (default `/tmp/cwdiff`).
 
 ## Speed
 
+The workload is a round robin of the eight warriors in `testdata/` and
+pMARS's `warriors/`: 28 pairs × 250 rounds, 468 M instructions, placed like
+`pmars -F`, with every pair's result identical to pMARS
+(`scripts/pmars-tournament.sh` plays the same pairs with pMARS).
+
+| machine | pMARS 0.9.2 | `cw` (fast engine) | |
+|---|---:|---:|---:|
+| Apple M-series (macOS, arm64) | 5.06 s | 2.07 s | ×2.4 |
+| AMD Ryzen 7 5800H (Zen 3, Linux) | 5.08 s | 3.33 s | ×1.5 |
+
+hyperfine, 5–10 runs, spread under 2%; one core. Measured and not kept:
+
+| idea | result |
+|---|---|
+| `-C target-cpu=native` on Zen 3 | 3.41 s against 3.33 s: nothing |
+| operand evaluation without branches on the mode | twice as slow: forced loads and stores cost more than the branches |
+| core size 8000 as a compile-time constant | no change |
+| two matches interleaved in one loop (`--lanes 2`, `src/multi.rs`) | 5% slower on M-series, 13% slower on Zen 3 |
+| SIMD lanes | not built: battles diverge at once, so a vector lane would have to execute every opcode for every lane; interleaving is the scalar form of the same idea, and it lost |
+
+What did pay, in order: a second engine with 8-byte cells, a memset core
+reset and ring-buffer queues (×2); keeping the hot state in registers by
+running a round on separate `&mut` slices, with the round unrolled by pairs
+of moves (−22%); computing branch targets only where used (−7%). The plain
+engine (`src/mars.rs`) stays as the reference the fast one is checked
+against.
+
 ```sh
-cargo bench --bench mars        # instructions per second, three workloads
+cargo bench --bench mars        # instructions per second: fast and reference, four workloads
+scripts/quickbench.sh           # the round robin, hyperfine
 scripts/hyperfine.sh 2000       # cw vs pMARS on identical matches; results in bench/
+scripts/profile.sh              # samply: share of samples per source line;
+ASM=1 scripts/profile.sh        #   and per instruction of the hot function (macOS)
 ```
 
 `hyperfine.sh` first checks that both produce the same result for each pair;
@@ -51,6 +81,8 @@ cw check FILE...                  assemble, report name/author/length or the err
 cw list FILE                      the assembled program
 cw pair A B [--rounds N] [--seed S]
                                   a match, like `pmars -b -r N -F S+100 A B`
+cw tournament FILE... [--rounds N] [--lanes 1|2]
+                                  a round robin, pair k placed like -F 100+997k mod 7801
 cw battle A B --pos N [--first 0|1]
                                   one battle, like `pmars -b -r 1 -F N A B`
 ```
