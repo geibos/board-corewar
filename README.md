@@ -164,6 +164,28 @@ and zero for the others, so a warrior that reads them uninitialized
 assembles differently depending on its position. `Config::first_warrior`
 chooses which (default: first).
 
+### Untrusted sources
+
+Warriors come from anyone, so every source gets an answer — accepted or
+rejected — in bounded time and memory, without a crash. pMARS's own limits
+are kept: 1000 instructions, lines read 255 bytes at a time, 7 labels on a
+line, recursive `EQU` rejected. Where pMARS hangs or crashes this port has
+limits of its own, and there it rejects what pMARS would accept:
+
+| input | pMARS | here |
+|---|---|---|
+| source over 1 MiB | reads it | "source too large" (`MAX_SOURCE_BYTES`; the largest program pMARS can assemble is about 250 KiB) |
+| FOR blocks or EQU substitutions nested over 10 000 deep | accepts up to ~100 000, then segfaults | "nesting too deep" |
+| FOR/ROF or multi-line EQU expansion reading over 100 000 lines, e.g. two nested `FOR 65535` around nothing | runs for hours | "too much FOR expansion" |
+| text that is not UTF-8 | reads bytes | `cw` refuses the file (the library takes `&str`) |
+
+The assembler runs on a thread of its own with a 64 MiB stack, so how deep
+a source may nest is set by the limit above, not by the caller's stack, and
+is the same in debug and release builds. Symbols are looked up through a
+hash index instead of pMARS's list scan: tens of thousands of labels took
+seconds. `tests/hostile.rs` pins each case and runs random garbage through
+the assembler with a time limit.
+
 ## License
 
 MIT.

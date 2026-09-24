@@ -138,7 +138,7 @@ fn second(cfg: &Config) -> Config {
 }
 
 fn load(path: &str, cfg: &Config) -> Warrior {
-    let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+    let src = corewar::asm::read_source(path.as_ref()).unwrap_or_else(|e| {
         eprintln!("{}: {}", path, e);
         exit(2)
     });

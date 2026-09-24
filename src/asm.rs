@@ -18,9 +18,48 @@
 //!   26 registers `a`..`z` with `=` assignment and its precedence quirks.
 //!
 //! Warnings do not stop assembly; errors do. Which is which follows pMARS.
+//!
+//! Sources come from anyone, so every input gets an answer in bounded time
+//! and stack. Where pMARS has a limit it is kept; where pMARS hangs or
+//! crashes, there is a limit of this port's own, each an error pMARS does
+//! not give:
+//!
+//! * a source over [`MAX_SOURCE_BYTES`] is rejected ("source too large");
+//! * nesting of FOR blocks, EQU substitutions and tokens is capped at
+//!   `MAX_DEPTH` recursive calls ("nesting too deep"): each level recurses,
+//!   and without a cap the stack overflows (on the 8 MiB main thread near
+//!   17 000 levels; pMARS segfaults near 100 000). Assembly runs on a thread
+//!   with `ASM_STACK` so that the cap, not the caller, decides;
+//! * FOR/ROF and multi-line EQU expansion is capped at `MAX_EXPANSION`
+//!   lines read ("too much FOR expansion"): a FOR that produces nothing can
+//!   still run 65 535 rounds, and nested ones run for hours in pMARS.
 
 use crate::redcode::{Instruction, Mode, Modifier, Opcode, Warrior};
+use std::collections::HashMap;
 use std::fmt;
+
+/// The largest source accepted. The biggest program pMARS assembles is
+/// 1000 instructions of at most 255 characters, about 250 KiB; real
+/// warriors are a few KiB. 1 MiB leaves room for comments and bounds the
+/// work before assembly begins.
+pub const MAX_SOURCE_BYTES: usize = 1 << 20;
+
+/// Active recursive calls (`trav2`, `automaton`) at once. A line recurses
+/// once per token, up to about 250; each FOR level or EQU substitution adds
+/// one. A level takes about 540 bytes of stack in a release build and
+/// 2.9 KiB in a debug one, so the limit is set by `ASM_STACK`, not by the
+/// caller's stack (2 MiB on a test thread would allow only ~700 levels in
+/// debug).
+const MAX_DEPTH: u32 = 10_000;
+
+/// The stack of the thread assembly runs on: MAX_DEPTH levels with room to
+/// spare in a debug build. Only the pages touched are ever allocated.
+const ASM_STACK: usize = 64 << 20;
+
+/// Lines read while expanding FOR blocks and multi-line EQUs. The output a
+/// program can use is 1000 lines; the expansion guard below stops at
+/// 100 000 output lines, and this bounds the rounds that output nothing.
+const MAX_EXPANSION: u32 = 100_000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
@@ -135,6 +174,24 @@ pub struct Assembly {
     pub warnings: Vec<AsmError>,
 }
 
+/// Read a source file, refusing one over [`MAX_SOURCE_BYTES`] without
+/// reading the rest of it. The text must be UTF-8: pMARS reads bytes and
+/// accepts any, this port takes `&str`.
+pub fn read_source(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_SOURCE_BYTES as u64 + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() > MAX_SOURCE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} (over {} bytes)", E::Big.text(), MAX_SOURCE_BYTES),
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Assemble a warrior; the first error, if any.
 pub fn assemble(src: &str, cfg: &Config) -> Result<Warrior, AsmError> {
     assemble_full(src, cfg)
@@ -144,10 +201,39 @@ pub fn assemble(src: &str, cfg: &Config) -> Result<Warrior, AsmError> {
 
 /// Assemble a warrior, keeping every warning; on failure, every error.
 pub fn assemble_full(src: &str, cfg: &Config) -> Result<Assembly, Vec<AsmError>> {
-    let mut a = Asm::new(cfg);
-    let warrior = a.run(src);
+    if src.len() > MAX_SOURCE_BYTES {
+        return Err(vec![AsmError {
+            line: 0,
+            msg: E::Big.text().into(),
+            warning: false,
+        }]);
+    }
+    // On a thread of its own, so that the depth limit, not whoever called,
+    // decides how deep a source may nest.
+    let run = std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .name("assembler".into())
+            .stack_size(ASM_STACK)
+            .spawn_scoped(s, || {
+                let mut a = Asm::new(cfg);
+                let warrior = a.run(src);
+                (warrior, a.diags)
+            })
+            .map(|h| h.join())
+    });
+    let (warrior, diags) = match run {
+        Ok(Ok(done)) => done,
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(e) => {
+            return Err(vec![AsmError {
+                line: 0,
+                msg: format!("cannot start the assembler: {}", e),
+                warning: false,
+            }])
+        }
+    };
     let (errors, warnings): (Vec<AsmError>, Vec<AsmError>) =
-        a.diags.into_iter().partition(|d| !d.warning);
+        diags.into_iter().partition(|d| !d.warning);
     if errors.is_empty() {
         Ok(Assembly { warrior, warnings })
     } else {
@@ -652,6 +738,10 @@ enum E {
     Div,
     Ofl,
     Misc,
+    // This port's own limits (see the module comment).
+    Big,
+    Deep,
+    Work,
 }
 
 impl E {
@@ -690,6 +780,9 @@ impl E {
             E::Div => "division by zero",
             E::Ofl => "arithmetic overflow",
             E::Misc => "CURLINE cannot be a label",
+            E::Big => "source too large",
+            E::Deep => "nesting too deep",
+            E::Work => "too much FOR expansion",
         }
     }
 }
@@ -698,8 +791,19 @@ struct Asm<'c> {
     cfg: &'c Config,
     lists: Vec<Vec<Line>>,
     refs: Vec<Ref>,
+    /// For each name, the live `refs` that carry it, oldest first: pMARS
+    /// scans its symbol list for the newest match, which with tens of
+    /// thousands of labels is seconds of work.
+    index: HashMap<String, Vec<usize>>,
+    /// Live FOR counters (`RefKind::Stack`), innermost last.
+    counters: Vec<usize>,
     symtbl: Vec<String>,
     statefine: u32,
+    /// Recursion depth and lines expanded, against MAX_DEPTH and
+    /// MAX_EXPANSION; `halted` once either limit has stopped assembly.
+    depth: u32,
+    expanded: u32,
+    halted: bool,
     line: u32,
     vcont: bool,
     aline: Option<(usize, usize)>,
@@ -740,8 +844,13 @@ impl<'c> Asm<'c> {
             cfg,
             lists: vec![Vec::new()],
             refs: Vec::new(),
+            index: HashMap::new(),
+            counters: Vec::new(),
             symtbl: Vec::new(),
             statefine: 0,
+            depth: 0,
+            expanded: 0,
+            halted: false,
             line: 0,
             vcont: true,
             aline: None,
@@ -788,10 +897,53 @@ impl<'c> Asm<'c> {
         });
     }
 
+    /// The newest live symbol with this name.
     fn lookup(&self, name: &str) -> Option<usize> {
-        (0..self.refs.len())
-            .rev()
-            .find(|&i| self.refs[i].names.iter().any(|n| n == name))
+        self.index.get(name).and_then(|v| v.last().copied())
+    }
+
+    fn push_ref(&mut self, r: Ref) -> usize {
+        let k = self.refs.len();
+        for n in &r.names {
+            self.index.entry(n.clone()).or_default().push(k);
+        }
+        if matches!(r.kind, RefKind::Stack(_)) {
+            self.counters.push(k);
+        }
+        self.refs.push(r);
+        k
+    }
+
+    /// Drop the innermost FOR counter. pMARS unlinks it from its symbol
+    /// list; here it stays in `refs`, so indices held elsewhere stay valid,
+    /// and leaves the index.
+    fn pop_counter(&mut self) {
+        let Some(k) = self.counters.pop() else {
+            return;
+        };
+        for n in std::mem::take(&mut self.refs[k].names) {
+            if let Some(v) = self.index.get_mut(&n) {
+                v.retain(|&i| i != k);
+            }
+        }
+    }
+
+    /// Stop assembly on one of this port's own limits, reporting it once.
+    fn halt(&mut self, e: E) {
+        if !self.halted {
+            self.halted = true;
+            self.err(e);
+        }
+        self.vcont = false;
+    }
+
+    /// Count one line of FOR or EQU expansion; false once over the limit.
+    fn expand_one(&mut self) -> bool {
+        self.expanded += 1;
+        if self.expanded > MAX_EXPANSION {
+            self.halt(E::Work);
+        }
+        !self.halted
     }
 
     fn cur_text(&self) -> Option<String> {
@@ -830,7 +982,7 @@ impl<'c> Asm<'c> {
                 loc: 0,
             }]);
             let id = self.lists.len() - 1;
-            self.refs.push(Ref {
+            self.push_ref(Ref {
                 names: vec![n.into()],
                 kind: RefKind::Text(id),
                 visit: false,
@@ -975,7 +1127,7 @@ impl<'c> Asm<'c> {
         let group: Vec<String> = if let Some(counter) = self.symtbl.last().cloned() {
             if self.symtbl.len() > 1 {
                 let rest: Vec<String> = self.symtbl[..self.symtbl.len() - 1].to_vec();
-                self.refs.push(Ref {
+                self.push_ref(Ref {
                     names: rest,
                     kind: RefKind::Label(self.line),
                     visit: false,
@@ -1000,12 +1152,11 @@ impl<'c> Asm<'c> {
             if st == OVERFLOW {
                 self.err(E::Ofl);
             }
-            self.refs.push(Ref {
+            let me = self.push_ref(Ref {
                 names: group,
                 kind: RefKind::Stack(1),
                 visit: true,
             });
-            let me = self.refs.len() - 1;
             let limit = result as u16 as u32;
             let cline = self.aline;
             let mut n = 1u32;
@@ -1014,6 +1165,9 @@ impl<'c> Asm<'c> {
                 self.aline = cline;
                 while self.vcont {
                     if let Some(nx) = self.next_line() {
+                        if !self.expand_one() {
+                            break;
+                        }
                         self.aline = Some(nx);
                         dest.clear();
                         let text = self.cur_text().unwrap();
@@ -1037,12 +1191,7 @@ impl<'c> Asm<'c> {
                 n += 1;
             }
             // Remove the most recent FOR counter.
-            if let Some(k) = (0..self.refs.len())
-                .rev()
-                .find(|&k| matches!(self.refs[k].kind, RefKind::Stack(_)))
-            {
-                self.refs.remove(k);
-            }
+            self.pop_counter();
         }
         SFOR
     }
@@ -1071,7 +1220,7 @@ impl<'c> Asm<'c> {
             self.lists.push(body);
             let id = self.lists.len() - 1;
             let names = std::mem::take(&mut self.symtbl);
-            self.refs.push(Ref {
+            self.push_ref(Ref {
                 names,
                 kind: RefKind::Text(id),
                 visit: false,
@@ -1096,6 +1245,9 @@ impl<'c> Asm<'c> {
                 let d = dest.clone();
                 self.addline(&d);
             }
+            if !self.expand_one() {
+                break;
+            }
             self.aline = Some(nx);
             dest.clear();
             let text = self.cur_text().unwrap();
@@ -1109,8 +1261,30 @@ impl<'c> Asm<'c> {
         self.trav2(expr, dest, w)
     }
 
-    /// trav2(): rewrite one line (or the rest of one) into `dest`.
+    /// Enter a recursive call; false (and assembly stopped) past MAX_DEPTH.
+    /// Every recursion in the assembler — per token, per FOR level, per EQU
+    /// substitution — passes through `trav2` or `automaton`, so counting
+    /// their frames bounds the stack.
+    fn enter(&mut self) -> bool {
+        if self.depth >= MAX_DEPTH {
+            self.halt(E::Deep);
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
     fn trav2(&mut self, buffer: &str, dest: &mut String, wdecl: i32) -> i32 {
+        if !self.enter() {
+            return SERR;
+        }
+        let r = self.trav2_step(buffer, dest, wdecl);
+        self.depth -= 1;
+        r
+    }
+
+    /// trav2(): rewrite one line (or the rest of one) into `dest`.
+    fn trav2_step(&mut self, buffer: &str, dest: &mut String, wdecl: i32) -> i32 {
         let b = buffer.as_bytes();
         let mut idxp = 0usize;
         let (tt, token) = get_token(b, &mut idxp);
@@ -1204,7 +1378,7 @@ impl<'c> Asm<'c> {
                             if w != SERR {
                                 if !self.symtbl.is_empty() {
                                     let names = std::mem::take(&mut self.symtbl);
-                                    self.refs.push(Ref {
+                                    self.push_ref(Ref {
                                         names,
                                         kind: RefKind::Label(self.line),
                                         visit: false,
@@ -1403,6 +1577,13 @@ impl<'c> Asm<'c> {
     }
 
     fn automaton(&mut self, expr: &str, state: St) {
+        if self.enter() {
+            self.automaton_step(expr, state);
+            self.depth -= 1;
+        }
+    }
+
+    fn automaton_step(&mut self, expr: &str, state: St) {
         self.laststate = state;
         let b = expr.as_bytes();
         let mut idx = 0usize;
