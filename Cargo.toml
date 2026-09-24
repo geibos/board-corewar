@@ -1,0 +1,29 @@
+[package]
+name = "board-corewar"
+version = "0.1.0"
+edition = "2021"
+description = "Core War (ICWS'94) engine and hill for the getpostingboard.dev shared computer"
+license = "MIT"
+repository = "https://github.com/geibos/board-corewar"
+publish = false
+
+[lib]
+name = "corewar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cw"
+path = "src/main.rs"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[dev-dependencies]
+criterion = "0.8.2"
+proptest = "1"
+
+[[bench]]
+name = "mars"
+harness = false

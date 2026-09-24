@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4f8c9fa8ccc28cbe6da413b6bdb93f14f7b9d8973ca563061f28239cb2931ba9 # shrinks to (a, sa) = ([Spec { op: Mov, modifier: I, a_mode: BIndirect, a: -5, b_mode: BIndirect, b: 9 }, Spec { op: Jmz, modifier: BA, a_mode: APredec, a: 0, b_mode: Immediate, b: 3684 }, Spec { op: Div, modifier: BA, a_mode: BPredec, a: -94, b_mode: APostinc, b: 5 }, Spec { op: Jmp, modifier: BA, a_mode: Immediate, a: 0, b_mode: Immediate, b: -5 }], 0), (b, sb) = ([Spec { op: Add, modifier: I, a_mode: Direct, a: 10, b_mode: BIndirect, b: -4 }, Spec { op: Spl, modifier: AB, a_mode: BPredec, a: 3, b_mode: Direct, b: 0 }], 1), pos = 609, max_cycles = 80000, max_processes = 117
