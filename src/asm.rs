@@ -241,6 +241,17 @@ fn get_token(b: &[u8], i: &mut usize) -> (Tt, String) {
         }
         tok.push(b[src]);
         src += 1;
+        // pMARS reads bytes, and a byte above 0x7f is one "other" token of
+        // its own. Here the text is UTF-8: take the whole character, so that
+        // no slice of the line ever starts inside one. A run of such tokens
+        // behaves the same as pMARS's bytes: each is an error where a token
+        // is not allowed and copied through where it is.
+        if ch >= 0x80 {
+            while at(b, src) & 0xc0 == 0x80 {
+                tok.push(b[src]);
+                src += 1;
+            }
+        }
     }
     *i = src;
     (tt, String::from_utf8_lossy(&tok).into_owned())
