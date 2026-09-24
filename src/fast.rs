@@ -330,11 +330,20 @@ impl Run<'_> {
     }
 
     /// One instruction of warrior `w`; false if it has no processes after.
+    /// Dispatched on opcode and modifier together: build.rs generates a
+    /// match with an arm per pair, each calling `exec` with that pair as a
+    /// constant, so every arm is the body specialised for its modifier.
     #[inline(always)]
     pub(crate) fn step<const W: usize>(&mut self) -> bool {
         let cs = self.cs;
         let pc = self.pop::<W>() as u32;
         let ir = self.cell(pc);
+        include!(concat!(env!("OUT_DIR"), "/dispatch.rs"))
+    }
+
+    /// The body of an instruction; `opm` is a constant in every call.
+    #[inline(always)]
+    fn exec<const W: usize>(&mut self, cs: u32, pc: u32, ir: Cell, opm: u8) -> bool {
         let (rpa, a_at, aa, ab) = self.operand(pc, ir, ir.am, ir.a);
         let (wpb, _, mut ba, mut bb) = self.operand(pc, ir, ir.bm, ir.b);
         let t = self.fold(pc + wpb);
@@ -370,8 +379,8 @@ impl Run<'_> {
                 x - 1
             }
         };
-        let op = ir.opm >> 3;
-        let m = ir.opm & 7;
+        let op = opm >> 3;
+        let m = opm & 7;
         macro_rules! push {
             ($v:expr) => {
                 self.push::<W>($v)
