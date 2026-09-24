@@ -569,3 +569,58 @@ proptest! {
         prop_assert_eq!(ours, theirs, "{} {} {:?} -F {}", fa, fb, flags, x);
     }
 }
+
+/// Every match a hill plays, replayed by pMARS: the warrior whose id sorts
+/// first is pMARS's first, and -F is the seed plus the distance.
+#[test]
+#[ignore]
+fn hill_matches_like_pmars() {
+    let Some(pm) = pmars() else {
+        eprintln!("PMARS is not set; skipping");
+        return;
+    };
+    let dir = format!("{}/hill_{}", short_dir(), std::process::id());
+    let _ = std::fs::remove_dir_all(&dir);
+    let cw = env!("CARGO_BIN_EXE_cw");
+    let run = |args: &[&str]| {
+        let o = Command::new(cw).args(args).output().expect("run cw");
+        assert!(o.status.success(), "{:?}", o);
+        o.stdout
+    };
+    run(&["hill", "init", &dir, "--size", "0", "--rounds", "50"]);
+    let files: Vec<String> = corpus_files()
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let mut args = vec!["hill", "challenge", dir.as_str(), "--json"];
+    args.extend(files.iter().map(String::as_str));
+    let v: serde_json::Value = serde_json::from_slice(&run(&args)).unwrap();
+    let played = v["played"].as_array().unwrap();
+    assert!(played.len() >= 28, "{} matches", played.len());
+    for m in played {
+        let (a, b) = (m["a"].as_str().unwrap(), m["b"].as_str().unwrap());
+        let x = m["seed"].as_u64().unwrap() + 100;
+        let out = Command::new(&pm)
+            .args(["-b", "-r", "50", "-F", &x.to_string()])
+            .arg(format!("{}/warriors/{}.red", dir, a))
+            .arg(format!("{}/warriors/{}.red", dir, b))
+            .output()
+            .expect("run pmars");
+        let theirs = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| l.starts_with("Results:"))
+            .unwrap_or("NO RESULT")
+            .to_string();
+        let r = &m["result"];
+        assert_eq!(
+            format!("Results: {} {} {}", r["w1"], r["w2"], r["ties"]),
+            theirs,
+            "{} vs {}, -F {}",
+            a,
+            b,
+            x
+        );
+    }
+    eprintln!("hill: {} matches identical to pMARS", played.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}

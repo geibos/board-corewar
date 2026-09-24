@@ -142,6 +142,56 @@ differs between runs. A round robin, abridged:
 }
 ```
 
+## Hill
+
+A hill lives in a directory; anyone who can write to it can challenge it,
+and two runs at once wait for each other (a lock on `DIR/.lock`).
+
+```sh
+cw hill init HILL --size 20 --rounds 250      # pMARS flags too: -s -c -p -l -d
+cw hill challenge HILL a.red b.red --jobs 0   # each file in turn plays every member
+cw hill show HILL                              # the table; --json on all three
+```
+
+A challenger plays one match against each member; members are ranked by
+points against each other, and past `size` the lowest fall off. Each
+survivor's age grows by one per challenge. Only new pairs are played:
+results are kept in `results.json` until the rules that decide them change.
+
+The rules are in `HILL/hill.toml`, made by `init` and meant to be edited:
+
+```toml
+size = 20            # members kept; 0 keeps everyone (a ladder)
+rounds = 250
+tie_break = "older"  # on equal scores: "older" stays, or "newer"
+
+[params]             # pMARS's -s -c -p -l -d
+core_size = 8000
+cycles = 80000
+processes = 8000
+length = 100
+distance = 100
+
+[points]             # per round won, tied, lost
+win = 3
+tie = 1
+loss = 0
+```
+
+Changing `params` or `rounds` replays every match on the next `challenge`;
+changing `points`, `size` or `tie_break` only ranks again. A member that no
+longer assembles under new rules leaves the hill.
+
+Every match is reproducible with pMARS: of two warriors, the one whose id
+(the first 16 hex digits of the SHA-256 of its source, also its file name in
+`HILL/warriors/`) sorts first is pMARS's first warrior, and the position is
+`-F` = seed + distance, the seed derived from both ids and shown in
+`--json` output. `hill_matches_like_pmars` in `tests/pmars_diff.rs` replays
+a hill's matches with pMARS.
+
+Not yet: '88 rules (`-8`), a hill without P-space, pMARS's `-S`, battles of
+more than two warriors.
+
 ## Redcode accepted
 
 Everything pMARS 0.9.2 accepts with ICWS'94 extensions, the way pMARS

@@ -1,0 +1,288 @@
+//! `cw hill`: a hill directory, challenges, the result cache and the rules
+//! in hill.toml. Match results are checked against `cw pair`, which is
+//! itself checked against pMARS (tests/pmars_diff.rs).
+
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn cw(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_cw"))
+        .args(args)
+        .output()
+        .expect("run cw")
+}
+
+fn json(args: &[&str]) -> Value {
+    let mut all = args.to_vec();
+    all.push("--json");
+    let o = cw(&all);
+    assert!(o.status.success(), "{:?}", o);
+    serde_json::from_slice(&o.stdout).expect("stdout is one JSON document")
+}
+
+/// A fresh directory for one test's hill (or hills).
+fn scratch(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("cw-hill-{}-{}", std::process::id(), name));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn s(p: &Path) -> &str {
+    p.to_str().unwrap()
+}
+
+fn init(dir: &Path, extra: &[&str]) {
+    let mut args = vec!["hill", "init", s(dir), "--rounds", "20"];
+    args.extend_from_slice(extra);
+    let o = cw(&args);
+    assert!(o.status.success(), "{:?}", o);
+}
+
+fn challenge(dir: &Path, files: &[&str]) -> Value {
+    let mut args = vec!["hill", "challenge", s(dir)];
+    args.extend_from_slice(files);
+    json(&args)
+}
+
+/// (id, score) of each place, in order.
+fn table(v: &Value) -> Vec<(String, i64)> {
+    v["standings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_owned(),
+                r["score"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+const TRIO: [&str; 3] = [
+    "testdata/dwarf.red",
+    "testdata/imp.red",
+    "testdata/registers.red",
+];
+
+#[test]
+fn init_writes_the_rules_once() {
+    let root = scratch("init");
+    let dir = root.join("h");
+    init(&dir, &["--size", "5", "-s", "800", "-l", "20"]);
+    let rules = std::fs::read_to_string(dir.join("hill.toml")).unwrap();
+    assert!(rules.contains("size = 5"), "{}", rules);
+    assert!(rules.contains("core_size = 800"), "{}", rules);
+    // The distance defaults to the length, as in pMARS.
+    assert!(rules.contains("distance = 20"), "{}", rules);
+    let o = cw(&["hill", "init", s(&dir)]);
+    assert_eq!(o.status.code(), Some(2), "a second init must not overwrite");
+    // Parameters pMARS would refuse are refused here too.
+    let o = cw(&["hill", "init", s(&root.join("bad")), "-l", "50", "-d", "40"]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn every_pair_is_played_like_cw_pair_and_scored() {
+    let dir = scratch("pairs");
+    init(&dir, &["--size", "0"]);
+    let v = challenge(&dir, &TRIO);
+    let played = v["played"].as_array().unwrap();
+    assert_eq!(played.len(), 3);
+    let mut score = std::collections::HashMap::<String, i64>::new();
+    for m in played {
+        let (a, b) = (m["a"].as_str().unwrap(), m["b"].as_str().unwrap());
+        let seed = m["seed"].as_u64().unwrap().to_string();
+        let fa = dir.join("warriors").join(format!("{}.red", a));
+        let fb = dir.join("warriors").join(format!("{}.red", b));
+        let o = cw(&["pair", s(&fa), s(&fb), "--rounds", "20", "--seed", &seed]);
+        let r = &m["result"];
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).trim_end(),
+            format!("Results: {} {} {}", r["w1"], r["w2"], r["ties"])
+        );
+        let (w1, w2, t) = (
+            r["w1"].as_i64().unwrap(),
+            r["w2"].as_i64().unwrap(),
+            r["ties"].as_i64().unwrap(),
+        );
+        *score.entry(a.to_owned()).or_default() += 3 * w1 + t;
+        *score.entry(b.to_owned()).or_default() += 3 * w2 + t;
+    }
+    let t = table(&v);
+    assert_eq!(t.len(), 3);
+    for (id, sc) in &t {
+        assert_eq!(score[id], *sc, "score of {}", id);
+    }
+    assert!(t.windows(2).all(|w| w[0].1 >= w[1].1), "{:?}", t);
+    // show reads the same table from disk without playing.
+    let shown = json(&["hill", "show", s(&dir)]);
+    assert_eq!(table(&shown), t);
+}
+
+#[test]
+fn a_new_challenger_plays_only_new_pairs() {
+    let dir = scratch("cache");
+    init(&dir, &["--size", "0"]);
+    challenge(&dir, &TRIO);
+    let v = challenge(&dir, &["testdata/edge.red"]);
+    assert_eq!(v["played"].as_array().unwrap().len(), 3);
+    assert_eq!(table(&v).len(), 4);
+    // Nothing new: nothing played.
+    let v = challenge(&dir, &[]);
+    assert_eq!(v["played"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn the_order_of_arrival_does_not_change_results() {
+    let (x, y) = (scratch("order-x"), scratch("order-y"));
+    init(&x, &["--size", "0"]);
+    init(&y, &["--size", "0"]);
+    let a = challenge(&x, &TRIO);
+    let b = challenge(&y, &[TRIO[2], TRIO[1], TRIO[0]]);
+    let mut ta = table(&a);
+    let mut tb = table(&b);
+    ta.sort();
+    tb.sort();
+    assert_eq!(ta, tb);
+}
+
+#[test]
+fn the_hill_keeps_its_size_and_the_lowest_falls_off() {
+    let dir = scratch("size");
+    init(&dir, &["--size", "2"]);
+    let v = challenge(&dir, &TRIO);
+    let t = table(&v);
+    assert_eq!(t.len(), 2);
+    let off = v["pushed_off"].as_array().unwrap();
+    let statuses: Vec<&str> = v["challengers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["status"].as_str().unwrap())
+        .collect();
+    // The third may be the lowest itself; the first two entered a hill
+    // with room.
+    assert_eq!(&statuses[..2], ["entered", "entered"]);
+    assert!(
+        ["entered", "pushed_off"].contains(&statuses[2]),
+        "{:?}",
+        statuses
+    );
+    assert_eq!(off.len(), 1);
+    let gone = off[0]["id"].as_str().unwrap();
+    assert!(t.iter().all(|(id, _)| id != gone));
+    // Ages: the two left each survived the challenges after their own.
+    let ages: Vec<i64> = v["standings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["age"].as_i64().unwrap())
+        .collect();
+    assert!(ages.iter().all(|a| *a <= 2), "{:?}", ages);
+}
+
+/// Two imps with different comments are different warriors that always tie
+/// each other: equal scores, and the rule decides who stays.
+#[test]
+fn on_equal_scores_the_rule_decides() {
+    let root = scratch("ties");
+    let imp = std::fs::read_to_string("testdata/imp.red").unwrap();
+    let twin = root.join("twin.red");
+    std::fs::write(&twin, format!("{}\n; a twin\n", imp)).unwrap();
+
+    let older = root.join("older");
+    init(&older, &["--size", "1"]);
+    let first = challenge(&older, &["testdata/imp.red"]);
+    let incumbent = table(&first)[0].0.clone();
+    let v = challenge(&older, &[s(&twin)]);
+    assert_eq!(v["challengers"][0]["status"], "pushed_off");
+    assert_eq!(table(&v)[0].0, incumbent);
+    assert_eq!(v["standings"][0]["age"], 1);
+
+    let newer = root.join("newer");
+    init(&newer, &["--size", "1"]);
+    let rules = newer.join("hill.toml");
+    let text = std::fs::read_to_string(&rules).unwrap();
+    std::fs::write(
+        &rules,
+        text.replace("tie_break = \"older\"", "tie_break = \"newer\""),
+    )
+    .unwrap();
+    challenge(&newer, &["testdata/imp.red"]);
+    let v = challenge(&newer, &[s(&twin)]);
+    assert_eq!(v["challengers"][0]["status"], "entered");
+    assert_ne!(table(&v)[0].0, incumbent);
+}
+
+#[test]
+fn bad_and_repeated_warriors_leave_the_hill_as_it_was() {
+    let root = scratch("bad");
+    let dir = root.join("h");
+    init(&dir, &["--size", "0"]);
+    challenge(&dir, &TRIO[..2]);
+    let bad = root.join("bad.red");
+    std::fs::write(&bad, "MOV 0, 1\nFOO 1\n").unwrap();
+    let v = challenge(&dir, &[s(&bad), TRIO[0]]);
+    let cs = v["challengers"].as_array().unwrap();
+    assert_eq!(cs[0]["status"], "rejected");
+    assert!(!cs[0]["error"].as_str().unwrap().is_empty());
+    assert_eq!(cs[1]["status"], "duplicate");
+    assert_eq!(table(&v).len(), 2);
+    assert_eq!(v["played"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn changed_rules_replay_what_they_affect() {
+    let dir = scratch("rules");
+    init(&dir, &["--size", "0"]);
+    let before = challenge(&dir, &TRIO);
+    let rules = dir.join("hill.toml");
+    let text = std::fs::read_to_string(&rules).unwrap();
+
+    // Points change the scores, not the matches: nothing is replayed.
+    std::fs::write(&rules, text.replace("win = 3", "win = 2")).unwrap();
+    let v = challenge(&dir, &[]);
+    assert_eq!(v["played"].as_array().unwrap().len(), 0);
+    assert_ne!(table(&v), table(&before));
+
+    // Rounds change the matches: every pair is replayed.
+    let text = std::fs::read_to_string(&rules).unwrap();
+    std::fs::write(&rules, text.replace("rounds = 20", "rounds = 10")).unwrap();
+    let v = challenge(&dir, &[]);
+    assert_eq!(v["played"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn text_output_names_the_warriors() {
+    let dir = scratch("text");
+    init(&dir, &["--size", "0"]);
+    let o = cw(&["hill", "challenge", s(&dir), TRIO[0], TRIO[1]]);
+    assert!(o.status.success(), "{:?}", o);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("Dwarf"), "{}", out);
+    assert!(out.contains("entered"), "{}", out);
+    let o = cw(&["hill", "show", s(&dir)]);
+    assert!(String::from_utf8_lossy(&o.stdout).contains("Imp"));
+}
+
+/// Two runs at once on one hill: the lock makes the second wait, so neither
+/// loses the other's warriors.
+#[test]
+fn concurrent_challenges_do_not_lose_each_other() {
+    let dir = scratch("lock");
+    init(&dir, &["--size", "0"]);
+    let spawn = |files: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cw"));
+        c.args(["hill", "challenge", s(&dir)]).args(files);
+        c.spawn().expect("spawn cw")
+    };
+    let mut x = spawn(&TRIO[..2]);
+    let mut y = spawn(&[TRIO[2], "testdata/edge.red"]);
+    assert!(x.wait().unwrap().success());
+    assert!(y.wait().unwrap().success());
+    let v = json(&["hill", "show", s(&dir)]);
+    assert_eq!(table(&v).len(), 4);
+}

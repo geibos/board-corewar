@@ -8,10 +8,13 @@ use corewar::asm::{assemble, AsmError, Config, MAX_SOURCE_BYTES};
 use corewar::redcode::Warrior;
 use std::time::{Duration, Instant};
 
-/// Time allowed for one source. Debug builds run the same code several
-/// times slower.
+/// Time allowed for one source: a detector of hangs and blow-ups (the
+/// cases below took seconds to hours before), not a benchmark. CI runners
+/// and musl builds are several times slower than a desktop, and tests run
+/// side by side; debug builds are slower again. Growth rates are checked
+/// separately, by ratio.
 fn budget() -> Duration {
-    Duration::from_secs(if cfg!(debug_assertions) { 20 } else { 1 })
+    Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 10 })
 }
 
 /// Assemble, failing if it takes longer than the budget instead of hanging
@@ -113,16 +116,42 @@ fn empty_nested_for_loops_are_bounded() {
     assert_eq!(error_of(src), "too much FOR expansion");
 }
 
-/// Symbol lookup scanned every symbol: 40 000 labels took 4 s.
+fn equs(n: usize) -> String {
+    let equs: String = (0..n).map(|k| format!("l{} EQU {}\n", k, k)).collect();
+    equs + &format!("DAT l{}, 0\n", n - 1)
+}
+
+/// Fastest of three: the least disturbed by other tests running alongside.
+fn fastest(src: &str) -> Duration {
+    (0..3)
+        .map(|_| {
+            let t = Instant::now();
+            let _ = assemble(src, &Config::default());
+            t.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+/// Symbol lookup scanned every symbol: 40 000 labels took 4 s, and four
+/// times as many symbols took sixteen times as long.
 #[test]
 fn many_labels_and_equs_assemble_in_time() {
     // As many as fit in MAX_SOURCE_BYTES.
     let n = 45_000;
     let labels: String = (0..n).map(|k| format!("l{} DAT {}, 0\n", k, k)).collect();
     assert_eq!(error_of(&labels), "program too long");
-    let equs: String = (0..n).map(|k| format!("l{} EQU {}\n", k, k)).collect();
-    let w = assemble_bounded(&(equs + &format!("DAT l{}, 0\n", n - 1))).unwrap();
+    let w = assemble_bounded(&equs(n)).unwrap();
     assert_eq!(w.code.len(), 1);
+    let (small, large) = (fastest(&equs(n / 4)), fastest(&equs(n)));
+    let ratio = large.as_secs_f64() / small.as_secs_f64();
+    assert!(
+        ratio < 10.0,
+        "4x the symbols took {:.1}x as long ({:?} vs {:?}): lookup is not linear",
+        ratio,
+        large,
+        small
+    );
 }
 
 #[test]

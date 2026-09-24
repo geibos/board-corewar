@@ -5,6 +5,7 @@
 use clap::{Args, Parser, Subcommand};
 use corewar::asm::{assemble, Config};
 use corewar::fast::{Compiled, Engine};
+use corewar::hill::{self, Hill};
 use corewar::mars::{Outcome, Score};
 use corewar::multi::{Job, Multi};
 use corewar::pool;
@@ -83,6 +84,42 @@ enum Command {
         #[command(flatten)]
         params: Params,
     },
+    /// A hill kept in a directory: its rules (hill.toml), members and every
+    /// match between them. `cw hill init DIR`, then `cw hill challenge DIR
+    /// FILE...`.
+    Hill {
+        #[command(subcommand)]
+        command: HillCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum HillCommand {
+    /// Make DIR a hill. The rules go to DIR/hill.toml, which can be edited
+    /// later: points, tie rule and everything below.
+    Init {
+        dir: String,
+        /// Members kept; 0 keeps everyone (a ladder).
+        #[arg(long, default_value_t = 20)]
+        size: usize,
+        #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u32).range(1..))]
+        rounds: u32,
+        #[command(flatten)]
+        params: Params,
+    },
+    /// Each file challenges the hill in turn: it plays every member, and
+    /// past the size the lowest fall off. Matches already played are not
+    /// played again. With no files, replays what a change of rules left
+    /// missing.
+    Challenge {
+        dir: String,
+        files: Vec<String>,
+        /// Threads to play matches on; 0: one per CPU. Same results.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+    },
+    /// The table, best first.
+    Show { dir: String },
 }
 
 /// pMARS's match parameters, its flags and bounds. The core is limited to
@@ -290,6 +327,94 @@ fn main() {
             }
             tournament(&cfg, &files, threads, lanes == 2, json);
         }
+        Command::Hill { command } => hill_command(command, json),
+    }
+}
+
+fn threads(jobs: usize) -> usize {
+    match jobs {
+        0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+        n => n,
+    }
+}
+
+fn or_exit<T>(r: hill::Result<T>) -> T {
+    r.unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        exit(2)
+    })
+}
+
+fn hill_command(command: HillCommand, json: bool) {
+    match command {
+        HillCommand::Init {
+            dir,
+            size,
+            rounds,
+            params,
+        } => {
+            let rules = hill::Rules::new(&params.config(rounds), size);
+            or_exit(Hill::init(std::path::Path::new(&dir), &rules));
+            if !json {
+                println!(
+                    "{}: a hill of {} (0: no limit); rules in hill.toml",
+                    dir, size
+                );
+            }
+        }
+        HillCommand::Challenge { dir, files, jobs } => {
+            let mut h = or_exit(Hill::open(std::path::Path::new(&dir)));
+            let r = or_exit(h.challenge(&files, threads(jobs)));
+            if json {
+                print_json(&r);
+                return;
+            }
+            for c in &r.challengers {
+                let what = match c.status {
+                    hill::Status::Entered => format!("entered at {}", c.place.unwrap_or(0)),
+                    hill::Status::PushedOff => {
+                        format!("pushed off (placed {})", c.place.unwrap_or(0))
+                    }
+                    hill::Status::Rejected => {
+                        format!("rejected: {}", c.error.as_deref().unwrap_or(""))
+                    }
+                    hill::Status::Duplicate => "already on the hill".into(),
+                };
+                match &c.name {
+                    Some(n) => println!("{} ({}): {}", c.file, n, what),
+                    None => println!("{}: {}", c.file, what),
+                }
+            }
+            for g in &r.pushed_off {
+                println!("off: {} by {} ({})", g.name, g.author, g.reason);
+            }
+            print_standings(&r.standings);
+            eprintln!(
+                "{} matches played, {} instructions, {:.3} s",
+                r.played.len(),
+                r.stats.instructions,
+                r.stats.seconds
+            );
+        }
+        HillCommand::Show { dir } => {
+            let h = or_exit(Hill::open(std::path::Path::new(&dir)));
+            let r = or_exit(h.show());
+            if json {
+                print_json(&r);
+            } else {
+                print_standings(&r.standings);
+            }
+        }
+    }
+}
+
+fn print_standings(rows: &[hill::Standing]) {
+    println!("  #    score     W     T     L  age  name");
+    for r in rows {
+        println!(
+            "{:3} {:8} {:5} {:5} {:5} {:4}  {} by {} [{}]",
+            r.place, r.score, r.wins, r.ties, r.losses, r.age, r.name, r.author, r.id
+        );
     }
 }
 

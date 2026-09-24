@@ -40,6 +40,8 @@ jobs:
         run: PROPTEST_CASES=3000 cargo test --release --test pmars_diff assembler_matches -- --ignored
       - name: command-line parameters against pMARS
         run: PROPTEST_CASES=1000 cargo test --release --test pmars_diff cli_parameters -- --ignored
+      - name: hill matches against pMARS
+        run: cargo test --release --test pmars_diff hill_matches -- --ignored --nocapture
       - name: corpus against pMARS
         run: cargo test --release --test pmars_diff corpus -- --ignored --nocapture
       - name: soak against pMARS (manual runs only)
