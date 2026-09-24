@@ -58,6 +58,43 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The checks pMARS makes on its command-line parameters, with its
+    /// bounds, for `warriors` warriors; the error says which one failed.
+    /// One bound is this engine's own: the core holds at most 65535 cells
+    /// (addresses are 16 bits), where pMARS allows up to 2^30.
+    pub fn check(&self, warriors: u32) -> Result<(), String> {
+        let bounds: [(&str, u64, u64, &str); 5] = [
+            ("-s", self.core_size as u64, 65535, "core size"),
+            ("-c", self.max_cycles as u64, u32::MAX as u64, "cycles"),
+            (
+                "-p",
+                self.max_processes as u64,
+                i32::MAX as u64,
+                "processes",
+            ),
+            ("-l", self.max_length as u64, 1000, "warrior length"),
+            ("-d", self.min_distance as u64, 65535, "warrior distance"),
+        ];
+        for (flag, v, max, what) in bounds {
+            if v < 1 || v > max {
+                return Err(format!("{} {}: {} must be 1 to {}", flag, v, what, max));
+            }
+        }
+        if (self.min_distance as usize) < self.max_length {
+            return Err(format!(
+                "-d {}: warrior distance cannot be smaller than warrior length (-l {})",
+                self.min_distance, self.max_length
+            ));
+        }
+        if self.core_size < warriors * self.min_distance {
+            return Err(format!(
+                "-s {}: core size is too small for {} warriors {} apart (-d)",
+                self.core_size, warriors, self.min_distance
+            ));
+        }
+        Ok(())
+    }
+
     /// pMARS's default P-space size: the core divided by its largest divisor
     /// not above 16 (500 for the standard core of 8000).
     pub fn pspace_size(&self) -> u32 {

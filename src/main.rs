@@ -1,23 +1,8 @@
-//! `cw` — the hill's command line.
-//!
-//!   cw --version
-//!
-//!   cw check FILE...                 assemble, print name/author/length or the error
-//!   cw list FILE                     the assembled program, one instruction per line
-//!   cw pair A B [--rounds N] [--seed S]
-//!                                    a match of N rounds (default 250), like `pmars -b -r N`
-//!   cw battle A B --pos N [--first 0|1]
-//!                                    one battle, B loaded at N; prints `Results: W1 W2 T`
-//!                                    exactly like `pmars -b -r 1 -F N A B`
-//!   cw tournament FILE... [--rounds N] [--jobs N] [--lanes 1|2]
-//!                                    every pair plays a match; pair k is placed like
-//!                                    `pmars -r N -F X` with X = 100 + 997k mod 7801;
-//!                                    prints each pair's result and a score table
-//!                                    (win 3, tie 1, pMARS's default formula);
-//!                                    --jobs N plays matches on N threads (0: one per
-//!                                    CPU; default 1), same results (see src/pool.rs);
-//!                                    --lanes 2 interleaves two matches (see src/multi.rs)
+//! `cw` — the hill's command line. `cw help` and `cw help COMMAND` list the
+//! commands and their flags. Match parameters take pMARS's flags and
+//! defaults (-s -c -p -l -d), checked as pMARS checks them.
 
+use clap::{Args, Parser, Subcommand};
 use corewar::asm::{assemble, Config};
 use corewar::fast::{Compiled, Engine};
 use corewar::mars::{Outcome, Score};
@@ -25,6 +10,124 @@ use corewar::multi::{Job, Multi};
 use corewar::pool;
 use corewar::redcode::{Listing, Warrior};
 use std::process::exit;
+
+#[derive(Parser)]
+#[command(name = "cw", version, about = "Core War like pMARS 0.9.2, faster")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Assemble; print name, author and length, or the error.
+    Check {
+        #[arg(required = true)]
+        files: Vec<String>,
+        #[command(flatten)]
+        params: Params,
+    },
+    /// The assembled program, one instruction per line.
+    List {
+        file: String,
+        #[command(flatten)]
+        params: Params,
+    },
+    /// A match, like `pmars -b -r ROUNDS -F SEED+DISTANCE A B`.
+    Pair {
+        a: String,
+        b: String,
+        #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u32).range(1..))]
+        rounds: u32,
+        /// Position seed: pMARS's -F minus the distance.
+        #[arg(long, default_value_t = 1)]
+        seed: u32,
+        #[command(flatten)]
+        params: Params,
+    },
+    /// One battle, like `pmars -b -r 1 -F POS A B`.
+    Battle {
+        a: String,
+        b: String,
+        /// Where B is loaded; default half the core.
+        #[arg(long)]
+        pos: Option<u32>,
+        /// Which warrior moves first.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=1))]
+        first: u8,
+        #[command(flatten)]
+        params: Params,
+    },
+    /// Every pair plays a match; pair k is placed like `pmars -F X` with
+    /// X = DISTANCE + 997k mod (CORE + 1 - 2 DISTANCE). Prints each pair's
+    /// result and a score table (win 3, tie 1: pMARS's default formula).
+    Tournament {
+        #[arg(required = true, num_args = 2..)]
+        files: Vec<String>,
+        #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u32).range(1..))]
+        rounds: u32,
+        /// Threads to play matches on; 0: one per CPU. Same results.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+        /// 2 interleaves two matches on one thread (src/multi.rs).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
+        lanes: u8,
+        #[command(flatten)]
+        params: Params,
+    },
+}
+
+/// pMARS's match parameters, its flags and bounds. The core is limited to
+/// 65535 cells here (16-bit addresses); pMARS allows up to 2^30.
+#[derive(Args)]
+struct Params {
+    /// Size of core.
+    #[arg(short = 's', default_value_t = 8000, value_parser = clap::value_parser!(u32).range(1..=65535))]
+    core_size: u32,
+    /// Cycles until tie.
+    #[arg(short = 'c', default_value_t = 80000, value_parser = clap::value_parser!(u32).range(1..))]
+    cycles: u32,
+    /// Max. processes.
+    #[arg(short = 'p', default_value_t = 8000, value_parser = clap::value_parser!(u32).range(1..=i32::MAX as i64))]
+    processes: u32,
+    /// Max. warrior length.
+    #[arg(short = 'l', default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    length: u32,
+    /// Min. warriors distance; default the length, as in pMARS.
+    #[arg(short = 'd', value_parser = clap::value_parser!(u32).range(1..=65535))]
+    distance: Option<u32>,
+}
+
+impl Params {
+    /// The configuration for a match of `rounds` rounds, or exit 2 with
+    /// pMARS's reason. ROUNDS is visible to warriors, so a match assembles
+    /// with its own count.
+    fn config(&self, rounds: u32) -> Config {
+        let cfg = Config {
+            core_size: self.core_size,
+            max_cycles: self.cycles,
+            max_processes: self.processes,
+            max_length: self.length as usize,
+            min_distance: self.distance.unwrap_or(self.length),
+            rounds,
+            ..Config::default()
+        };
+        if let Err(e) = cfg.check(2) {
+            eprintln!("error: {}", e);
+            exit(2);
+        }
+        cfg
+    }
+}
+
+/// pMARS gives registers W and S values only for the first warrior it
+/// assembles: the configuration for the others.
+fn second(cfg: &Config) -> Config {
+    Config {
+        first_warrior: false,
+        ..*cfg
+    }
+}
 
 fn load(path: &str, cfg: &Config) -> Warrior {
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -37,33 +140,12 @@ fn load(path: &str, cfg: &Config) -> Warrior {
     })
 }
 
-fn flag(args: &[String], name: &str) -> Option<u32> {
-    let i = args.iter().position(|a| a == name)?;
-    Some(args.get(i + 1)?.parse().unwrap_or_else(|_| {
-        eprintln!("{} needs a number", name);
-        exit(2)
-    }))
-}
-
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    // ROUNDS is visible to warriors, so a match assembles with its own count.
-    let cfg = Config {
-        rounds: if matches!(
-            args.first().map(String::as_str),
-            Some("pair" | "tournament")
-        ) {
-            flag(&args, "--rounds").unwrap_or(250)
-        } else {
-            1
-        },
-        ..Config::default()
-    };
-    match args.first().map(String::as_str) {
-        Some("--version" | "-V") => println!("cw {}", env!("CARGO_PKG_VERSION")),
-        Some("check") if args.len() > 1 => {
+    match Cli::parse().command {
+        Command::Check { files, params } => {
+            let cfg = params.config(1);
             let mut bad = false;
-            for p in &args[1..] {
+            for p in &files {
                 match std::fs::read_to_string(p).map(|s| assemble(&s, &cfg)) {
                     Ok(Ok(w)) => println!(
                         "{}: ok, \"{}\" by {}, {} instructions",
@@ -84,8 +166,9 @@ fn main() {
             }
             exit(bad as i32);
         }
-        Some("list") if args.len() == 2 => {
-            let w = load(&args[1], &cfg);
+        Command::List { file, params } => {
+            let cfg = params.config(1);
+            let w = load(&file, &cfg);
             print!(
                 "{}",
                 Listing {
@@ -94,15 +177,19 @@ fn main() {
                 }
             );
         }
-        Some("pair") if args.len() >= 3 => {
-            let a = load(&args[1], &cfg);
-            let b = load(&args[2], &cfg);
-            let rounds = cfg.rounds;
-            let seed = flag(&args, "--seed").unwrap_or(1) as i32;
-            let (a, b) = (Compiled::new(&a), Compiled::new(&b));
+        Command::Pair {
+            a,
+            b,
+            rounds,
+            seed,
+            params,
+        } => {
+            let cfg = params.config(rounds);
+            let a = Compiled::new(&load(&a, &cfg));
+            let b = Compiled::new(&load(&b, &second(&cfg)));
             let mut mars = Engine::new(&cfg);
             let t0 = std::time::Instant::now();
-            let s = mars.play(&cfg, &a, &b, rounds, seed);
+            let s = mars.play(&cfg, &a, &b, rounds, seed as i32);
             let dt = t0.elapsed().as_secs_f64();
             println!("Results: {} {} {}", s.w1, s.w2, s.ties);
             eprintln!(
@@ -113,113 +200,114 @@ fn main() {
                 mars.steps as f64 / dt / 1e6
             );
         }
-        Some("battle") if args.len() >= 3 => {
-            let a = load(&args[1], &cfg);
-            let b = load(&args[2], &cfg);
-            let pos = flag(&args, "--pos").unwrap_or(cfg.core_size / 2);
-            let first = flag(&args, "--first").unwrap_or(0) as usize;
-            let (a, b) = (Compiled::new(&a), Compiled::new(&b));
+        Command::Battle {
+            a,
+            b,
+            pos,
+            first,
+            params,
+        } => {
+            let cfg = params.config(1);
+            let pos = pos.unwrap_or(cfg.core_size / 2);
+            if pos < cfg.min_distance {
+                eprintln!(
+                    "error: --pos {}: position of warrior #2 cannot be smaller than warrior distance (-d {})",
+                    pos, cfg.min_distance
+                );
+                exit(2);
+            }
+            let a = Compiled::new(&load(&a, &cfg));
+            let b = Compiled::new(&load(&b, &second(&cfg)));
             let mut mars = Engine::new(&cfg);
-            let (w1, w2, t) = match mars.battle(&cfg, [&a, &b], [0, pos], first) {
+            let (w1, w2, t) = match mars.battle(&cfg, [&a, &b], [0, pos], first as usize) {
                 Outcome::Win(0) => (1, 0, 0),
                 Outcome::Win(_) => (0, 1, 0),
                 Outcome::Tie => (0, 0, 1),
             };
             println!("Results: {} {} {}", w1, w2, t);
         }
-        Some("tournament") if args.len() >= 3 => {
-            let files: Vec<&String> = {
-                let mut v = Vec::new();
-                let mut i = 1;
-                while i < args.len() {
-                    if args[i].starts_with("--") {
-                        i += 2;
-                    } else {
-                        v.push(&args[i]);
-                        i += 1;
-                    }
-                }
-                v
-            };
-            let second = Config {
-                first_warrior: false,
-                ..cfg
-            };
-            let named: Vec<(Warrior, Compiled, Compiled)> = files
-                .iter()
-                .map(|f| {
-                    let w = load(f, &cfg);
-                    let c2 = Compiled::new(&load(f, &second));
-                    let c1 = Compiled::new(&w);
-                    (w, c1, c2)
-                })
-                .collect();
-            let ws: Vec<(&Compiled, &Compiled)> = named.iter().map(|(_, a, b)| (a, b)).collect();
-            let mut score = vec![0u64; ws.len()];
-            let mut jobs = Vec::new();
-            let mut pairs = Vec::new();
-            for i in 0..ws.len() {
-                for j in i + 1..ws.len() {
-                    let k = jobs.len() as u32;
-                    let x = 100 + (k * 997 % 7801);
-                    jobs.push(Job {
-                        a: ws[i].0,
-                        b: ws[j].1,
-                        seed: (x - cfg.min_distance) as i32,
-                    });
-                    pairs.push((i, j));
-                }
-            }
-            let lanes = flag(&args, "--lanes").unwrap_or(1);
-            let threads = match flag(&args, "--jobs").unwrap_or(1) {
+        Command::Tournament {
+            files,
+            rounds,
+            jobs,
+            lanes,
+            params,
+        } => {
+            let cfg = params.config(rounds);
+            let threads = match jobs {
                 0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
-                n => n as usize,
+                n => n,
             };
-            if lanes >= 2 && threads > 1 {
-                eprintln!("--lanes 2 plays on one thread; drop --jobs");
+            if lanes == 2 && threads > 1 {
+                eprintln!("error: --lanes 2 plays on one thread; drop --jobs");
                 exit(2);
             }
-            let t0 = std::time::Instant::now();
-            let (results, steps): (Vec<Score>, u64) = if lanes >= 2 {
-                let mut m = Multi::new(&cfg);
-                let r = m.play_all(&cfg, &jobs, cfg.rounds);
-                (r, m.steps)
-            } else {
-                pool::play_all(&cfg, &jobs, cfg.rounds, threads)
-            };
-            let k = jobs.len();
-            for (&(i, j), s) in pairs.iter().zip(&results) {
-                println!(
-                    "{} vs {}: Results: {} {} {}",
-                    files[i], files[j], s.w1, s.w2, s.ties
-                );
-                score[i] += 3 * s.w1 as u64 + s.ties as u64;
-                score[j] += 3 * s.w2 as u64 + s.ties as u64;
-            }
-            let dt = t0.elapsed().as_secs_f64();
-            let mut order: Vec<usize> = (0..ws.len()).collect();
-            order.sort_by(|&x, &y| score[y].cmp(&score[x]));
-            for (place, &i) in order.iter().enumerate() {
-                println!(
-                    "{:3}. {:8} {} ({})",
-                    place + 1,
-                    score[i],
-                    named[i].0.name,
-                    files[i]
-                );
-            }
-            eprintln!(
-                "{} pairs x {} rounds, {} instructions, {:.3} s, {:.1} M instructions/s",
-                k,
-                cfg.rounds,
-                steps,
-                dt,
-                steps as f64 / dt / 1e6
-            );
-        }
-        _ => {
-            eprintln!("usage: cw check FILE... | cw list FILE | cw pair A B [--rounds N] [--seed S] | cw battle A B --pos N [--first 0|1]");
-            exit(2);
+            tournament(&cfg, &files, threads, lanes == 2);
         }
     }
+}
+
+fn tournament(cfg: &Config, files: &[String], threads: usize, lanes: bool) {
+    let named: Vec<(Warrior, Compiled, Compiled)> = files
+        .iter()
+        .map(|f| {
+            let w = load(f, cfg);
+            let c2 = Compiled::new(&load(f, &second(cfg)));
+            let c1 = Compiled::new(&w);
+            (w, c1, c2)
+        })
+        .collect();
+    let ws: Vec<(&Compiled, &Compiled)> = named.iter().map(|(_, a, b)| (a, b)).collect();
+    let mut score = vec![0u64; ws.len()];
+    let mut jobs = Vec::new();
+    let mut pairs = Vec::new();
+    // pmars -F X seeds its position generator with X - distance.
+    let positions = (cfg.core_size + 1 - 2 * cfg.min_distance) as u64;
+    for i in 0..ws.len() {
+        for j in i + 1..ws.len() {
+            let k = jobs.len() as u64;
+            jobs.push(Job {
+                a: ws[i].0,
+                b: ws[j].1,
+                seed: (k * 997 % positions) as i32,
+            });
+            pairs.push((i, j));
+        }
+    }
+    let t0 = std::time::Instant::now();
+    let (results, steps): (Vec<Score>, u64) = if lanes {
+        let mut m = Multi::new(cfg);
+        let r = m.play_all(cfg, &jobs, cfg.rounds);
+        (r, m.steps)
+    } else {
+        pool::play_all(cfg, &jobs, cfg.rounds, threads)
+    };
+    for (&(i, j), s) in pairs.iter().zip(&results) {
+        println!(
+            "{} vs {}: Results: {} {} {}",
+            files[i], files[j], s.w1, s.w2, s.ties
+        );
+        score[i] += 3 * s.w1 as u64 + s.ties as u64;
+        score[j] += 3 * s.w2 as u64 + s.ties as u64;
+    }
+    let dt = t0.elapsed().as_secs_f64();
+    let mut order: Vec<usize> = (0..ws.len()).collect();
+    order.sort_by(|&x, &y| score[y].cmp(&score[x]));
+    for (place, &i) in order.iter().enumerate() {
+        println!(
+            "{:3}. {:8} {} ({})",
+            place + 1,
+            score[i],
+            named[i].0.name,
+            files[i]
+        );
+    }
+    eprintln!(
+        "{} pairs x {} rounds, {} instructions, {:.3} s, {:.1} M instructions/s",
+        jobs.len(),
+        cfg.rounds,
+        steps,
+        dt,
+        steps as f64 / dt / 1e6
+    );
 }

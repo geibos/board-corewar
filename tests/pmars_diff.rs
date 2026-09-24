@@ -20,6 +20,9 @@
 //! * `corpus_matches_like_pmars` — real warriors: every pair from testdata/,
 //!   pMARS's own warriors/ and CW_CORPUS (colon-separated dirs) plays a full
 //!   match (CW_ROUNDS, default 250) against `pmars -r N -F X`, same positions.
+//! * `cli_parameters_like_pmars` — proptest: `cw pair` and `pmars -b` with
+//!   random -s -c -p -l -d, invalid sets included: both refuse, or both
+//!   print the same Results line.
 //!
 //! pMARS silently ignores warrior files with long paths, so warriors are
 //! written to a short directory: CW_DIFF_DIR, default /tmp/cwdiff.
@@ -453,5 +456,116 @@ fn source_generator_coverage() {
             f.escape_debug().to_string(),
             u
         );
+    }
+}
+
+/// Real warriors for the command-line checks, copied to the short directory.
+fn cli_warriors() -> Vec<String> {
+    let dir = short_dir();
+    let mut out = Vec::new();
+    let mut files: Vec<String> = ["dwarf", "edge", "imp", "registers"]
+        .iter()
+        .map(|n| format!("testdata/{}.red", n))
+        .collect();
+    for n in ["aeka", "flashpaper", "pspace", "rave", "validate"] {
+        let p = format!("third_party/pmars/warriors/{}.red", n);
+        if std::path::Path::new(&p).exists() {
+            files.push(p);
+        }
+    }
+    for f in files {
+        let short = format!("{}/cli_{}", dir, f.rsplit('/').next().unwrap());
+        std::fs::copy(&f, &short).unwrap();
+        out.push(short);
+    }
+    out
+}
+
+/// Match parameters as flags: `None` leaves a flag out.
+#[derive(Debug, Clone)]
+struct Params {
+    s: Option<u32>,
+    c: Option<u32>,
+    p: Option<u32>,
+    l: Option<u32>,
+    d: Option<u32>,
+    rounds: u32,
+    /// Position of warrior #2 past the distance: -F distance + k.
+    k: u32,
+}
+
+fn params() -> impl Strategy<Value = Params> {
+    // Weighted towards valid sets, so that most cases play a match; the
+    // rest check that both refuse the same ones.
+    let s = prop_oneof![
+        2 => Just(None),
+        1 => (2u32..400).prop_map(Some),
+        4 => (400u32..8000).prop_map(Some),
+        2 => (8000u32..=65535).prop_map(Some),
+    ];
+    let c = prop_oneof![1 => Just(None), 1 => (1u32..20_000).prop_map(Some)];
+    let p = prop_oneof![1 => Just(None), 1 => (1u32..100).prop_map(Some)];
+    let l = prop_oneof![
+        4 => Just(None),
+        1 => (1u32..12).prop_map(Some),
+        1 => (1u32..=1001).prop_map(Some),
+    ];
+    let d = prop_oneof![
+        4 => Just(None),
+        1 => (1u32..60).prop_map(Some),
+        1 => (100u32..3000).prop_map(Some),
+    ];
+    (s, c, p, l, d, 1u32..6, 0u32..20_000).prop_map(|(s, c, p, l, d, rounds, k)| Params {
+        s,
+        c,
+        p,
+        l,
+        d,
+        rounds,
+        k,
+    })
+}
+
+proptest! {
+    #![proptest_config(PtConfig { cases: cases() / 4, failure_persistence: persistence(), ..PtConfig::default() })]
+
+    /// `cw pair` with pMARS's parameter flags: refused by both, or the same
+    /// Results line. Parameters are random, invalid combinations included;
+    /// a warrior longer than -l is refused by both as well.
+    #[test]
+    #[ignore]
+    fn cli_parameters_like_pmars(pr in params(), a in 0usize..9, b in 0usize..9) {
+        let Some(pm) = pmars() else { return Ok(()); };
+        let ws = cli_warriors();
+        let (fa, fb) = (&ws[a % ws.len()], &ws[b % ws.len()]);
+        let distance = pr.d.or(pr.l).unwrap_or(100);
+        let x = distance + pr.k;
+        let mut flags: Vec<String> = Vec::new();
+        for (name, v) in [("-s", pr.s), ("-c", pr.c), ("-p", pr.p), ("-l", pr.l), ("-d", pr.d)] {
+            if let Some(v) = v {
+                flags.push(name.into());
+                flags.push(v.to_string());
+            }
+        }
+        let theirs = Command::new(&pm)
+            .args(["-b", "-r", &pr.rounds.to_string(), "-F", &x.to_string()])
+            .args(&flags)
+            .args([fa, fb])
+            .output()
+            .expect("run pmars");
+        let theirs = String::from_utf8_lossy(&theirs.stdout)
+            .lines()
+            .find(|l| l.starts_with("Results:"))
+            .map(str::to_owned);
+        let ours = Command::new(env!("CARGO_BIN_EXE_cw"))
+            .args(["pair", fa, fb, "--rounds", &pr.rounds.to_string(), "--seed", &pr.k.to_string()])
+            .args(&flags)
+            .output()
+            .expect("run cw");
+        let ours = ours
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&ours.stdout).trim_end().to_owned());
+        prop_assert_eq!(ours, theirs, "{} {} {:?} -F {}", fa, fb, flags, x);
     }
 }

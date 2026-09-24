@@ -102,13 +102,29 @@ Binaries for Linux (x86_64 and aarch64, static) and macOS (arm64) are on the
 cw check FILE...                  assemble, report name/author/length or the error
 cw list FILE                      the assembled program
 cw pair A B [--rounds N] [--seed S]
-                                  a match, like `pmars -b -r N -F S+100 A B`
+                                  a match, like `pmars -b -r N -F S+D A B`
 cw tournament FILE... [--rounds N] [--jobs N] [--lanes 1|2]
-                                  a round robin, pair k placed like -F 100+997k mod 7801;
+                                  a round robin, pair k placed like -F D+997k mod (S+1-2D);
                                   --jobs N: matches on N threads (0: one per CPU)
 cw battle A B --pos N [--first 0|1]
                                   one battle, like `pmars -b -r 1 -F N A B`
+cw help [COMMAND]                 the flags in full
 ```
+
+Every command takes pMARS's match parameters, with its defaults and its
+checks (a distance under the length, or a core under twice the distance,
+is refused with exit code 2, as pMARS refuses it):
+
+| flag | | default |
+|---|---|---:|
+| `-s` | size of core, at most 65535 here (pMARS: 2^30) | 8000 |
+| `-c` | cycles until tie | 80000 |
+| `-p` | max. processes | 8000 |
+| `-l` | max. warrior length, at most 1000 | 100 |
+| `-d` | min. distance between warriors (D) | the length |
+
+`cli_parameters_like_pmars` in `tests/pmars_diff.rs` plays random
+parameter sets, invalid ones included, through `cw pair` and `pmars -b`.
 
 ## Redcode accepted
 
