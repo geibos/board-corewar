@@ -10,13 +10,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # pMARS is GPL-2 and not part of this repository: it is fetched here, at a
-  # pinned commit, only to serve as the test oracle.
-  PMARS_REPO: https://github.com/mbarbon/pMARS
-  PMARS_COMMIT: e7e8d08c2be43a2fe84c49516b8f50553d3126bc
 
+# Stage 1: Lint and Tests side by side. Stage 2, once the tests pass: each
+# comparison with pMARS as its own job, in parallel. Soak: manual runs only.
 jobs:
-  test:
+  lint:
+    name: Lint (fmt, clippy, benches build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,27 +23,63 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: pMARS (oracle)
-        run: |
-          git clone -q "$PMARS_REPO" third_party/pmars
-          git -C third_party/pmars checkout -q "$PMARS_COMMIT"
-          make -C third_party/pmars/src CC=gcc LIB= \
-            CFLAGS="-std=gnu17 -O2 -DSERVER -DEXT94 -DPERMUTATE -Wno-implicit-function-declaration -Wno-int-conversion"
-          echo "PMARS=$PWD/third_party/pmars/src/pmars" >> "$GITHUB_ENV"
+        with:
+          shared-key: release
+          save-if: false
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --release -- -D warnings
-      - run: cargo test --release
-      - name: differential against pMARS
-        run: PROPTEST_CASES=5000 cargo test --release --test pmars_diff same_listing -- --ignored
-      - name: assembler against pMARS on random sources
-        run: PROPTEST_CASES=3000 cargo test --release --test pmars_diff assembler_matches -- --ignored
-      - name: command-line parameters against pMARS
-        run: PROPTEST_CASES=1000 cargo test --release --test pmars_diff cli_parameters -- --ignored
-      - name: hill matches against pMARS
-        run: cargo test --release --test pmars_diff hill_matches -- --ignored --nocapture
-      - name: corpus against pMARS
-        run: cargo test --release --test pmars_diff corpus -- --ignored --nocapture
-      - name: soak against pMARS (manual runs only)
-        if: github.event_name == 'workflow_dispatch'
-        run: CW_SOAK_SECS=${{ inputs.soak_secs }} cargo test --release --test pmars_diff soak -- --ignored --nocapture
       - run: cargo bench --no-run
+
+  test:
+    name: Tests (unit, property, CLI, hill)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - run: cargo test --release
+
+  pmars:
+    name: pMARS · ${{ matrix.suite.name }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: listings and battles
+            run: PROPTEST_CASES=5000 cargo test --release --test pmars_diff same_listing -- --ignored
+          - name: assembler on random sources
+            run: PROPTEST_CASES=3000 cargo test --release --test pmars_diff assembler_matches -- --ignored
+          - name: command-line parameters
+            run: PROPTEST_CASES=1000 cargo test --release --test pmars_diff cli_parameters -- --ignored
+          - name: hill matches
+            run: cargo test --release --test pmars_diff hill_matches -- --ignored --nocapture
+          - name: corpus of real warriors
+            run: cargo test --release --test pmars_diff corpus -- --ignored --nocapture
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - uses: ./.github/actions/pmars
+      - run: ${{ matrix.suite.run }}
+
+  soak:
+    name: pMARS · soak (manual runs only)
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: false
+      - uses: ./.github/actions/pmars
+      - run: CW_SOAK_SECS=${{ inputs.soak_secs }} cargo test --release --test pmars_diff soak -- --ignored --nocapture

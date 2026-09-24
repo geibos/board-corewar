@@ -1,0 +1,15 @@
+name: pMARS oracle
+description: >
+  Fetch pMARS 0.9.2 at a pinned commit, build it as the tests expect
+  (-DSERVER -DEXT94) and point PMARS at the binary. pMARS is GPL-2 and not
+  part of this repository; it is used only as the test oracle.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        git clone -q https://github.com/mbarbon/pMARS third_party/pmars
+        git -C third_party/pmars checkout -q e7e8d08c2be43a2fe84c49516b8f50553d3126bc
+        make -C third_party/pmars/src CC=gcc LIB= \
+          CFLAGS="-std=gnu17 -O2 -DSERVER -DEXT94 -DPERMUTATE -Wno-implicit-function-declaration -Wno-int-conversion"
+        echo "PMARS=$PWD/third_party/pmars/src/pmars" >> "$GITHUB_ENV"
