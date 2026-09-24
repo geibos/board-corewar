@@ -200,105 +200,39 @@ impl Compiled {
     }
 }
 
-/// A fixed ring buffer of program counters.
-struct Queue {
-    buf: Box<[u16]>,
-    head: usize,
-    len: usize,
+/// Everything the hot loop touches, borrowed for one round. Separate `&mut`
+/// slices tell the compiler the core, the two queues and P-space never
+/// alias, so queue heads and lengths, the core base and its size can live
+/// in registers instead of being reloaded from the engine after every store
+/// into the core (which is what the profile showed before).
+struct Run<'a> {
+    core: &'a mut [Cell],
+    qbuf: [&'a mut [u16]; 2],
+    head: [usize; 2],
+    len: [usize; 2],
     mask: usize,
+    cs: u32,
+    max_processes: usize,
+    pspace: &'a mut [Vec<u16>],
+    bank: [usize; 2],
+    last_result: &'a mut [u16; 2],
+    pspace_size: u32,
 }
 
-impl Queue {
-    fn new(max: usize) -> Queue {
-        let cap = (max + 1).next_power_of_two();
-        Queue {
-            buf: vec![0; cap].into_boxed_slice(),
-            head: 0,
-            len: 0,
-            mask: cap - 1,
-        }
-    }
+impl Run<'_> {
     #[inline(always)]
-    fn pop(&mut self) -> u16 {
-        let v = unsafe { *self.buf.get_unchecked(self.head) };
-        self.head = (self.head + 1) & self.mask;
-        self.len -= 1;
+    fn pop<const W: usize>(&mut self) -> u16 {
+        let h = self.head[W];
+        let v = unsafe { *self.qbuf[W].get_unchecked(h) };
+        self.head[W] = (h + 1) & self.mask;
+        self.len[W] -= 1;
         v
     }
     #[inline(always)]
-    fn push(&mut self, v: u16) {
-        let at = (self.head + self.len) & self.mask;
-        unsafe { *self.buf.get_unchecked_mut(at) = v };
-        self.len += 1;
-    }
-    fn clear(&mut self) {
-        self.head = 0;
-        self.len = 0;
-    }
-}
-
-pub struct Engine {
-    cs: u32,
-    max_processes: usize,
-    core: Vec<Cell>,
-    queues: [Queue; 2],
-    pspace: Vec<Vec<u16>>,
-    bank: [usize; 2],
-    last_result: [u16; 2],
-    pspace_size: u32,
-    pub steps: u64,
-}
-
-impl Engine {
-    pub fn new(cfg: &Config) -> Engine {
-        assert!(
-            cfg.core_size <= 65535,
-            "the fast engine handles cores up to 65535"
-        );
-        let ps = cfg.pspace_size();
-        Engine {
-            cs: cfg.core_size,
-            max_processes: cfg.max_processes as usize,
-            core: vec![Cell::default(); cfg.core_size as usize],
-            queues: [
-                Queue::new(cfg.max_processes as usize),
-                Queue::new(cfg.max_processes as usize),
-            ],
-            pspace: vec![vec![0; ps as usize]; 2],
-            bank: [0, 1],
-            last_result: [(cfg.core_size - 1) as u16; 2],
-            pspace_size: ps,
-            steps: 0,
-        }
-    }
-
-    pub fn core(&self) -> Vec<Instruction> {
-        self.core.iter().map(Cell::decode).collect()
-    }
-
-    pub fn begin_match(&mut self, a: &Compiled, b: &Compiled) {
-        let shared = a.pin.is_some() && a.pin == b.pin;
-        self.bank = if shared { [0, 0] } else { [0, 1] };
-        for bank in &mut self.pspace {
-            bank.fill(0);
-        }
-        self.last_result = [(self.cs - 1) as u16; 2];
-    }
-
-    fn load(&mut self, w: [&Compiled; 2], pos: [u32; 2]) {
-        self.core.fill(Cell::default());
-        for (k, (war, &p)) in w.iter().zip(pos.iter()).enumerate() {
-            let mut at = p as usize;
-            for c in &war.code {
-                self.core[at] = *c;
-                at += 1;
-                if at == self.cs as usize {
-                    at = 0;
-                }
-            }
-            self.queues[k].clear();
-            self.queues[k].push(((p + war.start as u32) % self.cs) as u16);
-        }
+    fn push<const W: usize>(&mut self, v: u16) {
+        let at = (self.head[W] + self.len[W]) & self.mask;
+        unsafe { *self.qbuf[W].get_unchecked_mut(at) = v };
+        self.len[W] += 1;
     }
 
     #[inline(always)]
@@ -369,39 +303,51 @@ impl Engine {
     }
 
     #[inline(always)]
-    fn get_pspace(&self, w: usize, idx: u16) -> u16 {
+    fn get_pspace<const W: usize>(&self, idx: u16) -> u16 {
         let i = (idx as u32 % self.pspace_size) as usize;
         if i == 0 {
-            self.last_result[w]
+            self.last_result[W]
         } else {
-            self.pspace[self.bank[w]][i]
+            self.pspace[self.bank[W]][i]
         }
     }
 
     #[inline(always)]
-    fn set_pspace(&mut self, w: usize, idx: u16, v: u16) {
+    fn set_pspace<const W: usize>(&mut self, idx: u16, v: u16) {
         let i = (idx as u32 % self.pspace_size) as usize;
         if i == 0 {
-            self.last_result[w] = v;
+            self.last_result[W] = v;
         } else {
-            let b = self.bank[w];
+            let b = self.bank[W];
             self.pspace[b][i] = v;
         }
     }
 
     /// One instruction of warrior `w`; false if it has no processes after.
     #[inline(always)]
-    fn step(&mut self, w: usize) -> bool {
-        self.steps += 1;
+    fn step<const W: usize>(&mut self) -> bool {
         let cs = self.cs;
-        let pc = self.queues[w].pop() as u32;
+        let pc = self.pop::<W>() as u32;
         let ir = self.cell(pc);
         let (rpa, a_at, aa, ab) = self.operand(pc, ir, ir.am, ir.a);
         let (wpb, _, mut ba, mut bb) = self.operand(pc, ir, ir.bm, ir.b);
         let t = self.fold(pc + wpb);
-        let next = self.fold(pc + 1) as u16;
-        let jump = self.fold(pc + rpa) as u16;
-        let skip = self.fold(pc + 2) as u16;
+        // Computed where used: most instructions need only one of them.
+        macro_rules! next {
+            () => {
+                self.fold(pc + 1) as u16
+            };
+        }
+        macro_rules! jump {
+            () => {
+                self.fold(pc + rpa) as u16
+            };
+        }
+        macro_rules! skip {
+            () => {
+                self.fold(pc + 2) as u16
+            };
+        }
         let add = |x: u16, y: u16| -> u16 {
             let s = x as u32 + y as u32;
             (if s >= cs { s - cs } else { s }) as u16
@@ -420,15 +366,14 @@ impl Engine {
         };
         let op = ir.opm >> 3;
         let m = ir.opm & 7;
-        let q = w;
         macro_rules! push {
             ($v:expr) => {
-                self.queues[q].push($v)
+                self.push::<W>($v)
             };
         }
         match op {
             O_DAT => {}
-            O_NOP => push!(next),
+            O_NOP => push!(next!()),
             O_MOV => {
                 if m == M_I {
                     let src = self.cell(a_at);
@@ -454,7 +399,7 @@ impl Engine {
                         }
                     }
                 }
-                push!(next);
+                push!(next!());
             }
             O_ADD | O_SUB | O_MUL => {
                 let f = |x: u16, y: u16| match op {
@@ -477,7 +422,7 @@ impl Engine {
                         c.b = f(bb, ab);
                     }
                 }
-                push!(next);
+                push!(next!());
             }
             O_DIV | O_MOD => {
                 let div = op == O_DIV;
@@ -508,17 +453,17 @@ impl Engine {
                     }
                 };
                 if alive {
-                    push!(next);
+                    push!(next!());
                 }
             }
-            O_JMP => push!(jump),
+            O_JMP => push!(jump!()),
             O_JMZ => {
                 let z = match m {
                     M_A | M_BA => ba == 0,
                     M_B | M_AB => bb == 0,
                     _ => ba == 0 && bb == 0,
                 };
-                push!(if z { jump } else { next });
+                push!(if z { jump!() } else { next!() });
             }
             O_JMN => {
                 let nz = match m {
@@ -526,7 +471,7 @@ impl Engine {
                     M_B | M_AB => bb != 0,
                     _ => ba != 0 || bb != 0,
                 };
-                push!(if nz { jump } else { next });
+                push!(if nz { jump!() } else { next!() });
             }
             O_DJN => {
                 let nz = match m {
@@ -551,12 +496,12 @@ impl Engine {
                         ba != 0 || bb != 0
                     }
                 };
-                push!(if nz { jump } else { next });
+                push!(if nz { jump!() } else { next!() });
             }
             O_SPL => {
-                push!(next);
-                if self.queues[q].len < self.max_processes {
-                    push!(jump);
+                push!(next!());
+                if self.len[W] < self.max_processes {
+                    push!(jump!());
                 }
             }
             O_SLT => {
@@ -568,7 +513,7 @@ impl Engine {
                     M_X => aa < bb && ab < ba,
                     _ => aa < ba && ab < bb,
                 };
-                push!(if lt { skip } else { next });
+                push!(if lt { skip!() } else { next!() });
             }
             O_CMP | O_SEQ | O_SNE => {
                 let eq = match m {
@@ -584,31 +529,132 @@ impl Engine {
                     }
                 };
                 let take = if op == O_SNE { !eq } else { eq };
-                push!(if take { skip } else { next });
+                push!(if take { skip!() } else { next!() });
             }
             O_LDP => {
                 let v = match m {
-                    M_A | M_AB => self.get_pspace(w, aa),
-                    _ => self.get_pspace(w, ab),
+                    M_A | M_AB => self.get_pspace::<W>(aa),
+                    _ => self.get_pspace::<W>(ab),
                 };
                 match m {
                     M_A | M_BA => self.cell_mut(t).a = v,
                     _ => self.cell_mut(t).b = v,
                 }
-                push!(next);
+                push!(next!());
             }
             _ => {
                 // O_STP
                 match m {
-                    M_A => self.set_pspace(w, ba, aa),
-                    M_AB => self.set_pspace(w, bb, aa),
-                    M_BA => self.set_pspace(w, ba, ab),
-                    _ => self.set_pspace(w, bb, ab),
+                    M_A => self.set_pspace::<W>(ba, aa),
+                    M_AB => self.set_pspace::<W>(bb, aa),
+                    M_BA => self.set_pspace::<W>(ba, ab),
+                    _ => self.set_pspace::<W>(bb, ab),
                 }
-                push!(next);
+                push!(next!());
             }
         }
-        self.queues[w].len != 0
+        self.len[W] != 0
+    }
+
+    /// Play until one warrior has no processes or `budget` instructions have
+    /// run; unrolled by pairs so each step knows its warrior at compile time.
+    /// Returns the outcome and the number of instructions executed.
+    fn run(&mut self, budget: u64, first: usize) -> (Outcome, u64) {
+        let mut steps = budget;
+        if first == 1 {
+            if steps == 0 {
+                return (Outcome::Tie, 0);
+            }
+            steps -= 1;
+            if !self.step::<1>() {
+                return (Outcome::Win(0), budget - steps);
+            }
+        }
+        loop {
+            if steps == 0 {
+                return (Outcome::Tie, budget);
+            }
+            steps -= 1;
+            if !self.step::<0>() {
+                return (Outcome::Win(1), budget - steps);
+            }
+            if steps == 0 {
+                return (Outcome::Tie, budget);
+            }
+            steps -= 1;
+            if !self.step::<1>() {
+                return (Outcome::Win(0), budget - steps);
+            }
+        }
+    }
+}
+
+pub struct Engine {
+    cs: u32,
+    max_processes: usize,
+    core: Vec<Cell>,
+    qbuf: [Box<[u16]>; 2],
+    mask: usize,
+    start_pc: [u16; 2],
+    pspace: Vec<Vec<u16>>,
+    bank: [usize; 2],
+    last_result: [u16; 2],
+    pspace_size: u32,
+    pub steps: u64,
+}
+
+impl Engine {
+    pub fn new(cfg: &Config) -> Engine {
+        assert!(
+            cfg.core_size <= 65535,
+            "the fast engine handles cores up to 65535"
+        );
+        let ps = cfg.pspace_size();
+        let cap = (cfg.max_processes as usize + 1).next_power_of_two();
+        Engine {
+            cs: cfg.core_size,
+            max_processes: cfg.max_processes as usize,
+            core: vec![Cell::default(); cfg.core_size as usize],
+            qbuf: [
+                vec![0; cap].into_boxed_slice(),
+                vec![0; cap].into_boxed_slice(),
+            ],
+            mask: cap - 1,
+            start_pc: [0; 2],
+            pspace: vec![vec![0; ps as usize]; 2],
+            bank: [0, 1],
+            last_result: [(cfg.core_size - 1) as u16; 2],
+            pspace_size: ps,
+            steps: 0,
+        }
+    }
+
+    pub fn core(&self) -> Vec<Instruction> {
+        self.core.iter().map(Cell::decode).collect()
+    }
+
+    pub fn begin_match(&mut self, a: &Compiled, b: &Compiled) {
+        let shared = a.pin.is_some() && a.pin == b.pin;
+        self.bank = if shared { [0, 0] } else { [0, 1] };
+        for bank in &mut self.pspace {
+            bank.fill(0);
+        }
+        self.last_result = [(self.cs - 1) as u16; 2];
+    }
+
+    fn load(&mut self, w: [&Compiled; 2], pos: [u32; 2]) {
+        self.core.fill(Cell::default());
+        for (k, (war, &p)) in w.iter().zip(pos.iter()).enumerate() {
+            let mut at = p as usize;
+            for c in &war.code {
+                self.core[at] = *c;
+                at += 1;
+                if at == self.cs as usize {
+                    at = 0;
+                }
+            }
+            self.start_pc[k] = ((p + war.start as u32) % self.cs) as u16;
+        }
     }
 
     pub fn round(
@@ -619,18 +665,25 @@ impl Engine {
         first: usize,
     ) -> Outcome {
         self.load(w, pos);
-        let mut steps = cfg.max_cycles as u64 * 2;
-        let mut cur = first;
-        let outcome = loop {
-            if steps == 0 {
-                break Outcome::Tie;
-            }
-            if !self.step(cur) {
-                break Outcome::Win(1 - cur);
-            }
-            cur = 1 - cur;
-            steps -= 1;
+        let [q0, q1] = &mut self.qbuf;
+        q0[0] = self.start_pc[0];
+        q1[0] = self.start_pc[1];
+        let mut run = Run {
+            core: &mut self.core,
+            qbuf: [&mut q0[..], &mut q1[..]],
+            head: [0, 0],
+            len: [1, 1],
+            mask: self.mask,
+            cs: self.cs,
+            max_processes: self.max_processes,
+            pspace: &mut self.pspace,
+            bank: self.bank,
+            last_result: &mut self.last_result,
+            pspace_size: self.pspace_size,
         };
+        let (outcome, executed) = run.run(cfg.max_cycles as u64 * 2, first);
+        // Counted per round rather than per instruction: the hot loop stays lean.
+        self.steps += executed;
         match outcome {
             Outcome::Win(x) => {
                 self.last_result[x] = 1;

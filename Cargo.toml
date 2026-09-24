@@ -27,3 +27,9 @@ proptest = "1"
 [[bench]]
 name = "mars"
 harness = false
+
+# Release plus line tables, for scripts/profile.sh.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

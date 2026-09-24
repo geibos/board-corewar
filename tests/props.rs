@@ -101,8 +101,17 @@ mod fast_vs_reference {
             rounds in 1u32..4, seed in 0i32..100000,
             cycles in prop_oneof![1u32..60, 1u32..4000, Just(80_000u32)],
             procs in prop_oneof![1u32..8, 1u32..300, Just(8000u32)],
+            // 8000 runs the specialised path, anything else the generic one
+            core in prop_oneof![2 => Just(8000u32), 1 => 60u32..400, 1 => Just(8192u32), 1 => Just(65535u32)],
         ) {
-            let cfg = Config { max_cycles: cycles, max_processes: procs, rounds, ..Config::default() };
+            let cfg = Config {
+                max_cycles: cycles,
+                max_processes: procs,
+                rounds,
+                core_size: core,
+                min_distance: (core / 4).min(100),
+                ..Config::default()
+            };
             let wa = assemble(&render("a", &a, sa), &cfg).unwrap();
             let wb = assemble(&render("b", &b, sb), &cfg).unwrap();
             let mut slow = Mars::new(&cfg, 2);
