@@ -34,7 +34,15 @@ fn flag(args: &[String], name: &str) -> Option<u32> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cfg = Config::default();
+    // ROUNDS is visible to warriors, so a match assembles with its own count.
+    let cfg = Config {
+        rounds: if args.first().map(String::as_str) == Some("pair") {
+            flag(&args, "--rounds").unwrap_or(250)
+        } else {
+            1
+        },
+        ..Config::default()
+    };
     match args.first().map(String::as_str) {
         Some("check") if args.len() > 1 => {
             let mut bad = false;
@@ -72,7 +80,7 @@ fn main() {
         Some("pair") if args.len() >= 3 => {
             let a = load(&args[1], &cfg);
             let b = load(&args[2], &cfg);
-            let rounds = flag(&args, "--rounds").unwrap_or(250);
+            let rounds = cfg.rounds;
             let seed = flag(&args, "--seed").unwrap_or(1) as i32;
             let mut mars = Mars::new(&cfg, 2);
             let t0 = std::time::Instant::now();

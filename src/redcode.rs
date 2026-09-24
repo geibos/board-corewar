@@ -18,9 +18,15 @@ pub enum Opcode {
     Djn,
     Spl,
     Slt,
+    /// The '88 name of SEQ. It executes exactly like SEQ, but pMARS keeps it
+    /// a distinct opcode, and SEQ.I/SNE.I compare opcodes: a CMP cell and a
+    /// SEQ cell are not equal.
+    Cmp,
     Seq,
     Sne,
     Nop,
+    Ldp,
+    Stp,
 }
 
 impl Opcode {
@@ -39,10 +45,12 @@ impl Opcode {
             "DJN" => Opcode::Djn,
             "SPL" => Opcode::Spl,
             "SLT" => Opcode::Slt,
-            // CMP is the '88 name of SEQ; they are one opcode.
-            "CMP" | "SEQ" => Opcode::Seq,
+            "CMP" => Opcode::Cmp,
+            "SEQ" => Opcode::Seq,
             "SNE" => Opcode::Sne,
             "NOP" => Opcode::Nop,
+            "LDP" => Opcode::Ldp,
+            "STP" => Opcode::Stp,
             _ => return None,
         })
     }
@@ -62,13 +70,16 @@ impl Opcode {
             Opcode::Djn => "DJN",
             Opcode::Spl => "SPL",
             Opcode::Slt => "SLT",
+            Opcode::Cmp => "CMP",
             Opcode::Seq => "SEQ",
             Opcode::Sne => "SNE",
             Opcode::Nop => "NOP",
+            Opcode::Ldp => "LDP",
+            Opcode::Stp => "STP",
         }
     }
 
-    pub const ALL: [Opcode; 16] = [
+    pub const ALL: [Opcode; 19] = [
         Opcode::Dat,
         Opcode::Mov,
         Opcode::Add,
@@ -82,9 +93,12 @@ impl Opcode {
         Opcode::Djn,
         Opcode::Spl,
         Opcode::Slt,
+        Opcode::Cmp,
         Opcode::Seq,
         Opcode::Sne,
         Opcode::Nop,
+        Opcode::Ldp,
+        Opcode::Stp,
     ];
 }
 
@@ -223,7 +237,7 @@ pub fn default_modifier(op: Opcode, a_mode: Mode, b_mode: Mode) -> Modifier {
     use Opcode::*;
     match op {
         Dat | Nop => Modifier::F,
-        Mov | Seq | Sne => {
+        Mov | Cmp | Seq | Sne => {
             if a_mode == Mode::Immediate {
                 Modifier::AB
             } else if b_mode == Mode::Immediate {
@@ -241,7 +255,7 @@ pub fn default_modifier(op: Opcode, a_mode: Mode, b_mode: Mode) -> Modifier {
                 Modifier::F
             }
         }
-        Slt => {
+        Slt | Ldp | Stp => {
             if a_mode == Mode::Immediate {
                 Modifier::AB
             } else {
@@ -259,6 +273,8 @@ pub struct Warrior {
     pub code: Vec<Instruction>,
     /// Offset of the first instruction to execute, relative to the load address.
     pub start: u32,
+    /// `PIN n`: warriors with the same number share their P-space.
+    pub pin: Option<i64>,
 }
 
 /// Signed rendering of a normalized field, the way pMARS prints listings:

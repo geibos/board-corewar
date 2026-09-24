@@ -36,6 +36,8 @@ jobs:
       - run: cargo test --release
       - name: differential against pMARS
         run: PROPTEST_CASES=5000 cargo test --release --test pmars_diff same_listing -- --ignored
+      - name: assembler against pMARS on random sources
+        run: PROPTEST_CASES=3000 cargo test --release --test pmars_diff assembler_matches -- --ignored
       - name: corpus against pMARS
         run: cargo test --release --test pmars_diff corpus -- --ignored --nocapture
       - name: soak against pMARS (manual runs only)

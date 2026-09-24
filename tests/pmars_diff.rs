@@ -26,6 +26,7 @@
 
 mod common;
 
+use common::source::source;
 use common::{render, warrior, warrior_of, Spec};
 use corewar::asm::{assemble, Config};
 use corewar::mars::{Mars, Outcome};
@@ -47,15 +48,17 @@ fn short_dir() -> String {
     dir
 }
 
-/// pMARS's listing of the first program and its `Results:` line.
-fn parse_pmars(out: &str) -> (u32, Vec<String>, String) {
+/// pMARS's listing of the first program and its `Results:` line. The start
+/// is the line pMARS labels START; it labels none when execution starts
+/// outside the program (a warning), hence the Option.
+fn parse_pmars(out: &str) -> (Option<u32>, Vec<String>, String) {
     let result = out
         .lines()
         .find(|l| l.starts_with("Results:"))
         .unwrap_or("NO RESULT")
         .to_string();
     let mut code = Vec::new();
-    let mut start = 0;
+    let mut start = None;
     let mut lines = out.lines().skip_while(|l| !l.starts_with("Program "));
     lines.next();
     for l in lines {
@@ -69,7 +72,7 @@ fn parse_pmars(out: &str) -> (u32, Vec<String>, String) {
         }
         let t = match t.strip_prefix("START") {
             Some(rest) => {
-                start = code.len() as u32;
+                start = Some(code.len() as u32);
                 rest.trim_start()
             }
             None => t,
@@ -82,14 +85,14 @@ fn parse_pmars(out: &str) -> (u32, Vec<String>, String) {
             continue;
         };
         let norm = |x: &str| x.split_whitespace().collect::<String>();
-        code.push(format!(
-            "{} {}, {}",
-            opm.replace("CMP", "SEQ"),
-            norm(a),
-            norm(b)
-        ));
+        code.push(format!("{} {}, {}", opm, norm(a), norm(b)));
     }
     (start, code, result)
+}
+
+/// The start as pMARS's listing shows it: none when outside the program.
+fn listed_start(w: &Warrior) -> Option<u32> {
+    ((w.start as usize) < w.code.len()).then_some(w.start)
 }
 
 fn our_listing(w: &Warrior, cs: u32) -> Vec<String> {
@@ -126,7 +129,14 @@ fn check(
 ) -> Result<(), TestCaseError> {
     let dir = short_dir();
     let (src_a, src_b) = (render("a", &a, sa), render("b", &b, sb));
-    let id = std::process::id();
+    // Unique per call: cargo runs tests on parallel threads of one process,
+    // and two tests sharing a file name compared each other's warriors.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = format!(
+        "{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let (pa, pb) = (
         format!("{}/a{}.red", dir, id),
         format!("{}/b{}.red", dir, id),
@@ -140,7 +150,14 @@ fn check(
         ..Config::default()
     };
     let wa = assemble(&src_a, &cfg).unwrap();
-    let wb = assemble(&src_b, &cfg).unwrap();
+    let wb = assemble(
+        &src_b,
+        &Config {
+            first_warrior: false,
+            ..cfg
+        },
+    )
+    .unwrap();
 
     let out = Command::new(pmars)
         .args([
@@ -159,6 +176,8 @@ fn check(
         .expect("run pmars");
     let (their_start, their_code, their_result) =
         parse_pmars(&String::from_utf8_lossy(&out.stdout));
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
 
     prop_assert_eq!(
         our_listing(&wa, cfg.core_size),
@@ -166,7 +185,7 @@ fn check(
         "listing of\n{}",
         src_a
     );
-    prop_assert_eq!(wa.start, their_start);
+    prop_assert_eq!(listed_start(&wa), their_start);
     let ours = match Mars::new(&cfg, 2).battle(&cfg, [&wa, &wb], [0, pos], 0) {
         Outcome::Win(0) => "Results: 1 0 0",
         Outcome::Win(_) => "Results: 0 1 0",
@@ -203,6 +222,56 @@ proptest! {
     ) {
         let Some(pm) = pmars() else { return Ok(()); };
         check(&pm, (a, b, pos, c, p))?;
+    }
+}
+
+/// One source: pMARS and this assembler must agree on accepting or
+/// rejecting it, and when both accept, on the listing and the start.
+fn check_source(pmars: &str, src: &str) -> Result<(), TestCaseError> {
+    let dir = short_dir();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = format!(
+        "{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let path = format!("{}/s{}.red", dir, id);
+    std::fs::write(&path, src).unwrap();
+    let out = Command::new(pmars)
+        .args(["-r", "1", "-F", "4000", &path, "testdata/imp.red"])
+        .output()
+        .expect("run pmars");
+    let _ = std::fs::remove_file(&path);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    // Accepted means pMARS went on to fight: with errors it prints "Number of
+    // errors", or, past its error limit, only "Program aborted".
+    let theirs_ok = text.contains("Results:");
+    let ours = assemble(src, &Config::default());
+    prop_assert_eq!(
+        ours.is_ok(),
+        theirs_ok,
+        "accept/reject differs; ours: {:?}\n--- source ---\n{}\n--- pmars ---\n{}",
+        ours.as_ref().err(),
+        src,
+        text
+    );
+    if let Ok(w) = ours {
+        let (start, code, _) = parse_pmars(&text);
+        prop_assert_eq!(our_listing(&w, 8000), code, "listing of\n{}", src);
+        prop_assert_eq!(listed_start(&w), start, "start of\n{}", src);
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(PtConfig { cases: cases(), failure_persistence: persistence(), max_shrink_iters: 8000, ..PtConfig::default() })]
+
+    #[test]
+    #[ignore]
+    fn assembler_matches_pmars_on_sources(src in source()) {
+        let Some(pm) = pmars() else { return Ok(()); };
+        check_source(&pm, &src)?;
     }
 }
 
@@ -285,25 +354,35 @@ fn corpus_matches_like_pmars() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(250);
-    let cfg = Config::default();
+    // ROUNDS is visible to warriors (pspace.red asserts ROUNDS > 1): assemble
+    // with the match's own number of rounds, as pmars -r N does.
+    let cfg = Config {
+        rounds,
+        ..Config::default()
+    };
     let dir = short_dir();
     let mut warriors = Vec::new();
     for p in corpus_files() {
         let src = std::fs::read_to_string(&p).unwrap_or_default();
-        match assemble(&src, &cfg) {
-            Ok(w) => {
+        // Assembled twice: as pMARS's first warrior and as its second.
+        let second = Config {
+            first_warrior: false,
+            ..cfg
+        };
+        match (assemble(&src, &cfg), assemble(&src, &second)) {
+            (Ok(w1), Ok(w2)) => {
                 let short = format!("{}/c{}.red", dir, warriors.len());
                 std::fs::write(&short, &src).unwrap();
-                warriors.push((p.display().to_string(), short, w));
+                warriors.push((p.display().to_string(), short, w1, w2));
             }
-            Err(e) => eprintln!("skip {}: {}", p.display(), e),
+            (Err(e), _) | (_, Err(e)) => eprintln!("skip {}: {}", p.display(), e),
         }
     }
     assert!(warriors.len() >= 2, "need at least two warriors");
     let mut mars = Mars::new(&cfg, 2);
     let mut pairs = 0;
-    for (i, (na, fa, wa)) in warriors.iter().enumerate() {
-        for (nb, fb, wb) in warriors.iter().skip(i + 1) {
+    for (i, (na, fa, wa, _)) in warriors.iter().enumerate() {
+        for (nb, fb, _, wb) in warriors.iter().skip(i + 1) {
             // pmars -F X seeds its position generator with X - separation.
             let x = 100 + (pairs * 997 % 7801) as u32;
             let s = mars.play(&cfg, wa, wb, rounds, (x - cfg.min_distance) as i32);
@@ -339,4 +418,40 @@ fn corpus_matches_like_pmars() {
         pairs,
         rounds
     );
+}
+
+/// How much the source generator exercises: the share of sources the
+/// assembler accepts, and of those, how many use each feature. A diff test
+/// that only ever compares rejections proves little.
+#[test]
+#[ignore]
+fn source_generator_coverage() {
+    use proptest::strategy::ValueTree;
+    let mut runner = TestRunner::deterministic();
+    let n = 3000;
+    let mut accepted = 0;
+    let feats = [
+        "for ", "&ct", "equ ", "CURLINE", "(r=", "(s=", "(t=", "\\\n", "org ", "pin ", "end ",
+        "mc0", "mc1",
+    ];
+    let mut used = vec![0usize; feats.len()];
+    for _ in 0..n {
+        let src = source().new_tree(&mut runner).unwrap().current();
+        if assemble(&src, &Config::default()).is_ok() {
+            accepted += 1;
+            for (k, f) in feats.iter().enumerate() {
+                if src.contains(f) {
+                    used[k] += 1;
+                }
+            }
+        }
+    }
+    eprintln!("accepted {} of {}", accepted, n);
+    for (f, u) in feats.iter().zip(used) {
+        eprintln!(
+            "  {:10} in {:4} accepted sources",
+            f.escape_debug().to_string(),
+            u
+        );
+    }
 }

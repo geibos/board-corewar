@@ -2,6 +2,8 @@
 //! opcode, modifier and addressing mode, written out as Redcode text.
 #![allow(dead_code)]
 
+pub mod source;
+
 use corewar::redcode::{Mode, Modifier, Opcode};
 use proptest::prelude::*;
 

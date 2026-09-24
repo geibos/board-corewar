@@ -32,6 +32,12 @@ pub struct Mars {
     max_processes: usize,
     pub core: Vec<Instruction>,
     queues: Vec<VecDeque<u32>>,
+    /// P-space banks; `bank[w]` is the bank warrior w uses (PIN shares one).
+    pspace: Vec<Vec<u32>>,
+    bank: Vec<usize>,
+    /// P-space cell 0 of each warrior: the result of its previous round.
+    last_result: Vec<u32>,
+    pspace_size: u32,
     /// Instructions executed since creation; for benchmarks.
     pub steps: u64,
 }
@@ -43,7 +49,54 @@ impl Mars {
             max_processes: cfg.max_processes as usize,
             core: vec![Instruction::EMPTY; cfg.core_size as usize],
             queues: vec![VecDeque::new(); warriors],
+            pspace: vec![vec![0; cfg.pspace_size() as usize]; warriors],
+            bank: (0..warriors).collect(),
+            last_result: vec![cfg.core_size - 1; warriors],
+            pspace_size: cfg.pspace_size(),
             steps: 0,
+        }
+    }
+
+    /// Fresh P-space for a match, shared between warriors with the same
+    /// PIN (pspace_init() in pMARS). Cell 0 starts at CORESIZE-1.
+    pub fn begin_match(&mut self, warriors: &[&Warrior]) {
+        let mut next = 0usize;
+        let mut assigned: Vec<Option<usize>> = vec![None; warriors.len()];
+        for i in 0..warriors.len() {
+            if assigned[i].is_some() {
+                continue;
+            }
+            assigned[i] = Some(next);
+            if let Some(pin) = warriors[i].pin {
+                for j in i + 1..warriors.len() {
+                    if warriors[j].pin == Some(pin) {
+                        assigned[j] = Some(next);
+                    }
+                }
+            }
+            next += 1;
+        }
+        self.bank = assigned.into_iter().map(|b| b.unwrap()).collect();
+        self.pspace = vec![vec![0; self.pspace_size as usize]; next];
+        self.last_result = vec![self.cs - 1; warriors.len()];
+    }
+
+    fn get_pspace(&self, w: usize, idx: u32) -> u32 {
+        let i = (idx % self.pspace_size) as usize;
+        if i == 0 {
+            self.last_result[w]
+        } else {
+            self.pspace[self.bank[w]][i]
+        }
+    }
+
+    fn set_pspace(&mut self, w: usize, idx: u32, v: u32) {
+        let i = (idx % self.pspace_size) as usize;
+        if i == 0 {
+            self.last_result[w] = v;
+        } else {
+            let b = self.bank[w];
+            self.pspace[b][i] = v;
         }
     }
 
@@ -301,7 +354,27 @@ impl Mars {
                 };
                 queue(self, if lt { skip } else { next });
             }
-            Opcode::Seq | Opcode::Sne => {
+            Opcode::Ldp => {
+                let v = match m {
+                    Modifier::A | Modifier::AB => self.get_pspace(w, air.a),
+                    _ => self.get_pspace(w, air.b),
+                };
+                match m {
+                    Modifier::A | Modifier::BA => self.core[t].a = v,
+                    _ => self.core[t].b = v,
+                }
+                queue(self, next);
+            }
+            Opcode::Stp => {
+                match m {
+                    Modifier::A => self.set_pspace(w, bir.a, air.a),
+                    Modifier::AB => self.set_pspace(w, bir.b, air.a),
+                    Modifier::BA => self.set_pspace(w, bir.a, air.b),
+                    _ => self.set_pspace(w, bir.b, air.b),
+                }
+                queue(self, next);
+            }
+            Opcode::Cmp | Opcode::Seq | Opcode::Sne => {
                 let eq = match m {
                     Modifier::A => air.a == bir.a,
                     Modifier::B => air.b == bir.b,
@@ -319,16 +392,30 @@ impl Mars {
                             && air.b == bir.b
                     }
                 };
-                let take = if ir.op == Opcode::Seq { eq } else { !eq };
+                let take = if ir.op == Opcode::Sne { !eq } else { eq };
                 queue(self, if take { skip } else { next });
             }
         }
         !self.queues[w].is_empty()
     }
 
-    /// One battle of two warriors. `first` moves first; each warrior gets up
-    /// to `max_cycles` instructions, as in pMARS.
+    /// One battle of two warriors as a match of one round: fresh P-space.
     pub fn battle(
+        &mut self,
+        cfg: &Config,
+        warriors: [&Warrior; 2],
+        positions: [u32; 2],
+        first: usize,
+    ) -> Outcome {
+        self.begin_match(&warriors);
+        self.round(cfg, warriors, positions, first)
+    }
+
+    /// One round of a match. P-space carries over from earlier rounds, and
+    /// each warrior's cell 0 gets this round's result for the next one (0 if
+    /// it died, otherwise the number of survivors). `first` moves first;
+    /// each warrior gets up to `max_cycles` instructions, as in pMARS.
+    pub fn round(
         &mut self,
         cfg: &Config,
         warriors: [&Warrior; 2],
@@ -338,14 +425,27 @@ impl Mars {
         self.load(&warriors, &positions);
         let mut steps = cfg.max_cycles as u64 * 2;
         let mut w = first;
-        while steps > 0 {
+        let outcome = loop {
+            if steps == 0 {
+                break Outcome::Tie;
+            }
             if !self.step(w) {
-                return Outcome::Win(1 - w);
+                break Outcome::Win(1 - w);
             }
             w = 1 - w;
             steps -= 1;
+        };
+        match outcome {
+            Outcome::Win(x) => {
+                self.last_result[x] = 1;
+                self.last_result[1 - x] = 0;
+            }
+            Outcome::Tie => {
+                self.last_result[0] = 2;
+                self.last_result[1] = 2;
+            }
         }
-        Outcome::Tie
+        outcome
     }
 }
 
@@ -385,10 +485,11 @@ impl Mars {
         let positions = cfg.core_size + 1 - 2 * sep;
         let mut seed = seed;
         let mut score = Score::default();
+        self.begin_match(&[a, b]);
         for r in 0..rounds {
             let pos = sep + (seed.rem_euclid(positions as i32)) as u32;
             seed = pmars_rng(seed);
-            match self.battle(cfg, [a, b], [0, pos], (r % 2) as usize) {
+            match self.round(cfg, [a, b], [0, pos], (r % 2) as usize) {
                 Outcome::Win(0) => score.w1 += 1,
                 Outcome::Win(_) => score.w2 += 1,
                 Outcome::Tie => score.ties += 1,
