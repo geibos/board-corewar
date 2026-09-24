@@ -2,20 +2,25 @@
 //!
 //!   cargo bench --bench mars
 //!
-//! Three workloads, because they stress different things:
-//! * dwarf vs imp — long battles that mostly run to the cycle limit (ties):
-//!   the steady-state interpreter loop;
-//! * edge vs dwarf — battles that end quickly: loading and setup per round;
-//! * random — generated warriors with every opcode, modifier and mode, fixed
-//!   seed: the dispatch as a whole.
+//! Workloads:
+//! * `corpus` — a round robin of real warriors (testdata/ plus pMARS's own
+//!   warriors/ when third_party/pmars is present), the hill's actual work;
+//! * `dwarf_vs_imp` — long battles that mostly run to the cycle limit: the
+//!   steady-state interpreter loop;
+//! * `edge_vs_dwarf` — battles that end at once: per-round setup;
+//! * `random` — generated warriors with every opcode, modifier and mode.
+//!
+//! Each on the fast engine and on the plain reference (`Mars`), so a change
+//! to one shows against the other.
 
 use corewar::asm::{assemble, Config};
+use corewar::fast::{Compiled, Engine};
 use corewar::mars::Mars;
 use corewar::redcode::{Mode, Modifier, Opcode, Warrior};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-fn load(path: &str, cfg: &Config) -> Warrior {
-    assemble(&std::fs::read_to_string(path).unwrap(), cfg).unwrap()
+fn load(path: &str, cfg: &Config) -> Option<Warrior> {
+    assemble(&std::fs::read_to_string(path).ok()?, cfg).ok()
 }
 
 fn random_warrior(seed: &mut u64, cfg: &Config) -> Warrior {
@@ -28,7 +33,7 @@ fn random_warrior(seed: &mut u64, cfg: &Config) -> Warrior {
     let len = 1 + next() % 10;
     let mut src = String::from(";name r\n");
     for i in 0..len {
-        let op = Opcode::ALL[(next() % 16) as usize];
+        let op = Opcode::ALL[(next() % Opcode::ALL.len() as u64) as usize];
         let m = Modifier::ALL[(next() % 7) as usize];
         let am = Mode::ALL[(next() % 8) as usize];
         let bm = Mode::ALL[(next() % 8) as usize];
@@ -47,48 +52,81 @@ fn random_warrior(seed: &mut u64, cfg: &Config) -> Warrior {
     assemble(&src, cfg).unwrap()
 }
 
-fn bench(c: &mut Criterion) {
-    let cfg = Config::default();
-    let dwarf = load("testdata/dwarf.red", &cfg);
-    let imp = load("testdata/imp.red", &cfg);
-    let edge = load("testdata/edge.red", &cfg);
+type Pairs = Vec<(Warrior, Warrior)>;
+
+fn workloads(cfg: &Config) -> Vec<(&'static str, Pairs, u32)> {
+    let corpus: Vec<Warrior> = [
+        "testdata/dwarf.red",
+        "testdata/imp.red",
+        "third_party/pmars/warriors/aeka.red",
+        "third_party/pmars/warriors/flashpaper.red",
+        "third_party/pmars/warriors/pspace.red",
+        "third_party/pmars/warriors/rave.red",
+        "third_party/pmars/warriors/validate.red",
+    ]
+    .iter()
+    .filter_map(|p| load(p, cfg))
+    .collect();
+    let mut rr = Vec::new();
+    for i in 0..corpus.len() {
+        for j in i + 1..corpus.len() {
+            rr.push((corpus[i].clone(), corpus[j].clone()));
+        }
+    }
+    let dwarf = load("testdata/dwarf.red", cfg).unwrap();
+    let imp = load("testdata/imp.red", cfg).unwrap();
+    let edge = load("testdata/edge.red", cfg).unwrap();
     let mut seed = 0x9e3779b97f4a7c15u64;
-    let randoms: Vec<(Warrior, Warrior)> = (0..20)
+    let randoms = (0..20)
         .map(|_| {
             (
-                random_warrior(&mut seed, &cfg),
-                random_warrior(&mut seed, &cfg),
+                random_warrior(&mut seed, cfg),
+                random_warrior(&mut seed, cfg),
             )
         })
         .collect();
+    vec![
+        ("corpus", rr, 4),
+        ("dwarf_vs_imp", vec![(dwarf.clone(), imp)], 20),
+        ("edge_vs_dwarf", vec![(edge, dwarf)], 200),
+        ("random", randoms, 20),
+    ]
+}
 
+fn bench(c: &mut Criterion) {
+    let cfg = Config {
+        rounds: 20,
+        ..Config::default()
+    };
     let mut g = c.benchmark_group("mars");
-    let rounds = 20;
-    for (name, a, b) in [
-        ("dwarf_vs_imp", &dwarf, &imp),
-        ("edge_vs_dwarf", &edge, &dwarf),
-    ] {
-        let mut m = Mars::new(&cfg, 2);
-        m.play(&cfg, a, b, rounds, 1);
-        g.throughput(Throughput::Elements(m.steps));
-        g.bench_function(BenchmarkId::new(name, rounds), |bch| {
+    g.sample_size(20);
+    for (name, pairs, rounds) in workloads(&cfg) {
+        let compiled: Vec<(Compiled, Compiled)> = pairs
+            .iter()
+            .map(|(a, b)| (Compiled::new(a), Compiled::new(b)))
+            .collect();
+        let mut probe = Engine::new(&cfg);
+        for (k, (a, b)) in compiled.iter().enumerate() {
+            probe.play(&cfg, a, b, rounds, k as i32 + 1);
+        }
+        g.throughput(Throughput::Elements(probe.steps));
+        g.bench_function(BenchmarkId::new("fast", name), |bch| {
+            let mut e = Engine::new(&cfg);
+            bch.iter(|| {
+                for (k, (a, b)) in compiled.iter().enumerate() {
+                    e.play(&cfg, a, b, rounds, k as i32 + 1);
+                }
+            })
+        });
+        g.bench_function(BenchmarkId::new("reference", name), |bch| {
             let mut m = Mars::new(&cfg, 2);
-            bch.iter(|| m.play(&cfg, a, b, rounds, 1))
+            bch.iter(|| {
+                for (k, (a, b)) in pairs.iter().enumerate() {
+                    m.play(&cfg, a, b, rounds, k as i32 + 1);
+                }
+            })
         });
     }
-    let mut m = Mars::new(&cfg, 2);
-    for (a, b) in &randoms {
-        m.play(&cfg, a, b, rounds, 1);
-    }
-    g.throughput(Throughput::Elements(m.steps));
-    g.bench_function(BenchmarkId::new("random_pairs", randoms.len()), |bch| {
-        let mut m = Mars::new(&cfg, 2);
-        bch.iter(|| {
-            for (a, b) in &randoms {
-                m.play(&cfg, a, b, rounds, 1);
-            }
-        })
-    });
     g.finish();
 }
 

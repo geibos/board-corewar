@@ -81,3 +81,36 @@ proptest! {
         let _ = Outcome::Tie;
     }
 }
+
+mod fast_vs_reference {
+    use super::common::{render, warrior_of};
+    use corewar::asm::{assemble, Config};
+    use corewar::fast::{Compiled, Engine};
+    use corewar::mars::Mars;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 3000, ..ProptestConfig::default() })]
+
+        /// The fast engine is the reference engine, faster: same outcome of
+        /// every round, same number of instructions executed, same core at
+        /// the end — across a match of several rounds, so P-space carries.
+        #[test]
+        fn fast_engine_equals_reference(
+            (a, sa) in warrior_of(20), (b, sb) in warrior_of(20),
+            rounds in 1u32..4, seed in 0i32..100000,
+            cycles in prop_oneof![1u32..60, 1u32..4000, Just(80_000u32)],
+            procs in prop_oneof![1u32..8, 1u32..300, Just(8000u32)],
+        ) {
+            let cfg = Config { max_cycles: cycles, max_processes: procs, rounds, ..Config::default() };
+            let wa = assemble(&render("a", &a, sa), &cfg).unwrap();
+            let wb = assemble(&render("b", &b, sb), &cfg).unwrap();
+            let mut slow = Mars::new(&cfg, 2);
+            let mut fast = Engine::new(&cfg);
+            let (ca, cb) = (Compiled::new(&wa), Compiled::new(&wb));
+            prop_assert_eq!(slow.play(&cfg, &wa, &wb, rounds, seed), fast.play(&cfg, &ca, &cb, rounds, seed));
+            prop_assert_eq!(slow.steps, fast.steps);
+            prop_assert_eq!(&slow.core, &fast.core());
+        }
+    }
+}

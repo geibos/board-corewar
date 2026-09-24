@@ -7,9 +7,15 @@
 //!   cw battle A B --pos N [--first 0|1]
 //!                                    one battle, B loaded at N; prints `Results: W1 W2 T`
 //!                                    exactly like `pmars -b -r 1 -F N A B`
+//!   cw tournament FILE... [--rounds N]
+//!                                    every pair plays a match; pair k is placed like
+//!                                    `pmars -r N -F X` with X = 100 + 997k mod 7801;
+//!                                    prints each pair's result and a score table
+//!                                    (win 3, tie 1, pMARS's default formula)
 
 use corewar::asm::{assemble, Config};
-use corewar::mars::{Mars, Outcome};
+use corewar::fast::{Compiled, Engine};
+use corewar::mars::Outcome;
 use corewar::redcode::{Listing, Warrior};
 use std::process::exit;
 
@@ -36,7 +42,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // ROUNDS is visible to warriors, so a match assembles with its own count.
     let cfg = Config {
-        rounds: if args.first().map(String::as_str) == Some("pair") {
+        rounds: if matches!(
+            args.first().map(String::as_str),
+            Some("pair" | "tournament")
+        ) {
             flag(&args, "--rounds").unwrap_or(250)
         } else {
             1
@@ -82,7 +91,8 @@ fn main() {
             let b = load(&args[2], &cfg);
             let rounds = cfg.rounds;
             let seed = flag(&args, "--seed").unwrap_or(1) as i32;
-            let mut mars = Mars::new(&cfg, 2);
+            let (a, b) = (Compiled::new(&a), Compiled::new(&b));
+            let mut mars = Engine::new(&cfg);
             let t0 = std::time::Instant::now();
             let s = mars.play(&cfg, &a, &b, rounds, seed);
             let dt = t0.elapsed().as_secs_f64();
@@ -100,13 +110,86 @@ fn main() {
             let b = load(&args[2], &cfg);
             let pos = flag(&args, "--pos").unwrap_or(cfg.core_size / 2);
             let first = flag(&args, "--first").unwrap_or(0) as usize;
-            let mut mars = Mars::new(&cfg, 2);
+            let (a, b) = (Compiled::new(&a), Compiled::new(&b));
+            let mut mars = Engine::new(&cfg);
             let (w1, w2, t) = match mars.battle(&cfg, [&a, &b], [0, pos], first) {
                 Outcome::Win(0) => (1, 0, 0),
                 Outcome::Win(_) => (0, 1, 0),
                 Outcome::Tie => (0, 0, 1),
             };
             println!("Results: {} {} {}", w1, w2, t);
+        }
+        Some("tournament") if args.len() >= 3 => {
+            let files: Vec<&String> = {
+                let mut v = Vec::new();
+                let mut i = 1;
+                while i < args.len() {
+                    if args[i].starts_with("--") {
+                        i += 2;
+                    } else {
+                        v.push(&args[i]);
+                        i += 1;
+                    }
+                }
+                v
+            };
+            let second = Config {
+                first_warrior: false,
+                ..cfg
+            };
+            let named: Vec<(Warrior, Compiled, Compiled)> = files
+                .iter()
+                .map(|f| {
+                    let w = load(f, &cfg);
+                    let c2 = Compiled::new(&load(f, &second));
+                    let c1 = Compiled::new(&w);
+                    (w, c1, c2)
+                })
+                .collect();
+            let ws: Vec<(&Compiled, &Compiled)> = named.iter().map(|(_, a, b)| (a, b)).collect();
+            let mut mars = Engine::new(&cfg);
+            let mut score = vec![0u64; ws.len()];
+            let t0 = std::time::Instant::now();
+            let mut k = 0u32;
+            for i in 0..ws.len() {
+                for j in i + 1..ws.len() {
+                    let x = 100 + (k * 997 % 7801);
+                    let s = mars.play(
+                        &cfg,
+                        ws[i].0,
+                        ws[j].1,
+                        cfg.rounds,
+                        (x - cfg.min_distance) as i32,
+                    );
+                    println!(
+                        "{} vs {}: Results: {} {} {}",
+                        files[i], files[j], s.w1, s.w2, s.ties
+                    );
+                    score[i] += 3 * s.w1 as u64 + s.ties as u64;
+                    score[j] += 3 * s.w2 as u64 + s.ties as u64;
+                    k += 1;
+                }
+            }
+            let dt = t0.elapsed().as_secs_f64();
+            let mut order: Vec<usize> = (0..ws.len()).collect();
+            order.sort_by(|&x, &y| score[y].cmp(&score[x]));
+            for (place, &i) in order.iter().enumerate() {
+                println!(
+                    "{:3}. {:8} {} ({})",
+                    place + 1,
+                    score[i],
+                    named[i].0.name,
+                    files[i]
+                );
+            }
+            eprintln!(
+                "{} pairs x {} rounds, {} instructions, {:.3} s, {:.1} M instructions/s",
+                k,
+                cfg.rounds,
+                mars.steps,
+                dt,
+                mars.steps as f64 / dt / 1e6
+            );
         }
         _ => {
             eprintln!("usage: cw check FILE... | cw list FILE | cw pair A B [--rounds N] [--seed S] | cw battle A B --pos N [--first 0|1]");
