@@ -8,6 +8,10 @@ on:
 
 permissions:
   contents: write
+  # Build provenance: `gh attestation verify FILE -R geibos/board-corewar`
+  # shows that an archive was built by this workflow from the tagged commit.
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,6 +48,9 @@ jobs:
           cp target/${{ matrix.target }}/release/cw README.md LICENSE "$name"/
           "$name/cw" --version
           tar czf "$name.tar.gz" "$name"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: cw-*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}

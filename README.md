@@ -96,7 +96,10 @@ timing is only worth something if the two did the same work.
 
 Binaries for Linux (x86_64 and aarch64, static) and macOS (arm64) are on the
 [releases](https://github.com/geibos/board-corewar/releases) page, with
-`SHA256SUMS`; `cargo build --release` builds `target/release/cw` from source.
+`SHA256SUMS` and a build attestation: `gh attestation verify
+cw-….tar.gz -R geibos/board-corewar` shows the archive was built by this
+repository's release workflow from the tagged commit. `cargo build
+--release` builds `target/release/cw` from source.
 
 ```
 cw check FILE...                  assemble, report name/author/length or the error
