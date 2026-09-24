@@ -45,6 +45,62 @@ fn pmars() -> Option<String> {
     std::env::var("PMARS").ok()
 }
 
+/// pMARS hangs on some sources (nested FOR loops of 65535 run for hours).
+/// With no answer there is nothing to compare, so a run that takes longer
+/// than PMARS_TIMEOUT seconds (default 20) is killed and `None` returned;
+/// the caller reports the source and skips the case.
+fn pmars_bounded(cmd: &mut Command) -> Option<std::process::Output> {
+    let limit = std::env::var("PMARS_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    run_bounded(cmd, Duration::from_secs(limit))
+}
+
+fn run_bounded(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run pmars");
+    let drain = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut v = Vec::new();
+            let _ = r.read_to_end(&mut v);
+            v
+        })
+    };
+    let out = drain(Box::new(child.stdout.take().unwrap()));
+    let err = drain(Box::new(child.stderr.take().unwrap()));
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().expect("wait for pmars") {
+            return Some(std::process::Output {
+                status,
+                stdout: out.join().unwrap(),
+                stderr: err.join().unwrap(),
+            });
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn a_hung_oracle_is_killed_not_waited_for() {
+    let t = Instant::now();
+    let out = run_bounded(Command::new("sleep").arg("30"), Duration::from_millis(300));
+    assert!(out.is_none());
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    let out = run_bounded(Command::new("echo").arg("hi"), Duration::from_secs(5)).unwrap();
+    assert_eq!(out.stdout, b"hi\n");
+}
+
 fn short_dir() -> String {
     let dir = std::env::var("CW_DIFF_DIR").unwrap_or_else(|_| "/tmp/cwdiff".into());
     std::fs::create_dir_all(&dir).unwrap();
@@ -162,21 +218,21 @@ fn check(
     )
     .unwrap();
 
-    let out = Command::new(pmars)
-        .args([
-            "-r",
-            "1",
-            "-F",
-            &pos.to_string(),
-            "-c",
-            &max_cycles.to_string(),
-            "-p",
-            &max_processes.to_string(),
-            &pa,
-            &pb,
-        ])
-        .output()
-        .expect("run pmars");
+    let Some(out) = pmars_bounded(Command::new(pmars).args([
+        "-r",
+        "1",
+        "-F",
+        &pos.to_string(),
+        "-c",
+        &max_cycles.to_string(),
+        "-p",
+        &max_processes.to_string(),
+        &pa,
+        &pb,
+    ])) else {
+        eprintln!("pMARS gave no answer; skipped:\n{}\n---\n{}", src_a, src_b);
+        return Ok(());
+    };
     let (their_start, their_code, their_result) =
         parse_pmars(&String::from_utf8_lossy(&out.stdout));
     let _ = std::fs::remove_file(&pa);
@@ -240,11 +296,19 @@ fn check_source(pmars: &str, src: &str) -> Result<(), TestCaseError> {
     );
     let path = format!("{}/s{}.red", dir, id);
     std::fs::write(&path, src).unwrap();
-    let out = Command::new(pmars)
-        .args(["-r", "1", "-F", "4000", &path, "testdata/imp.red"])
-        .output()
-        .expect("run pmars");
+    let out = pmars_bounded(Command::new(pmars).args([
+        "-r",
+        "1",
+        "-F",
+        "4000",
+        &path,
+        "testdata/imp.red",
+    ]));
     let _ = std::fs::remove_file(&path);
+    let Some(out) = out else {
+        eprintln!("pMARS gave no answer; skipped:\n{}", src);
+        return Ok(());
+    };
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     // Accepted means pMARS went on to fight: with errors it prints "Number of
