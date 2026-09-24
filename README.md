@@ -150,8 +150,17 @@ and two runs at once wait for each other (a lock on `DIR/.lock`).
 ```sh
 cw hill init HILL --size 20 --rounds 250      # pMARS flags too: -s -c -p -l -d
 cw hill challenge HILL a.red b.red --jobs 0   # each file in turn plays every member
-cw hill show HILL                              # the table; --json on all three
+cw hill show HILL                              # the table
+cw hill verify HILL --jobs 0                   # check it; --json on all four
 ```
+
+Whoever submits a warrior can run the challenge; `verify` is how everyone
+else checks the result without trusting them. It changes nothing and
+checks that each source hashes to its id and assembles under the rules,
+that `results.json` holds exactly the pairs on the hill, that every stored
+match comes out the same when played again, and that the table is in the
+order the rules give. Exit code 1 and a list of problems when anything
+differs. Ages and arrival order are taken as recorded.
 
 A challenger plays one match against each member; members are ranked by
 points against each other, and past `size` the lowest fall off. Each

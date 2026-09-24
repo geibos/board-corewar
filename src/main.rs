@@ -120,6 +120,15 @@ enum HillCommand {
     },
     /// The table, best first.
     Show { dir: String },
+    /// Check the hill without changing it: sources against their ids, every
+    /// stored match played again, the table against the rules. Exit code 1
+    /// when anything differs.
+    Verify {
+        dir: String,
+        /// Threads to replay matches on; 0: one per CPU.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+    },
 }
 
 /// pMARS's match parameters, its flags and bounds. The core is limited to
@@ -395,6 +404,26 @@ fn hill_command(command: HillCommand, json: bool) {
                 r.stats.instructions,
                 r.stats.seconds
             );
+        }
+        HillCommand::Verify { dir, jobs } => {
+            let h = or_exit(Hill::open(std::path::Path::new(&dir)));
+            let r = or_exit(h.verify(threads(jobs)));
+            if json {
+                print_json(&r);
+            } else {
+                for p in &r.problems {
+                    println!("{}: {}", p.kind, p.detail);
+                }
+                println!(
+                    "{}: {} members, {} matches replayed, {} problems ({:.1} s)",
+                    if r.ok { "ok" } else { "NOT OK" },
+                    r.members,
+                    r.replayed,
+                    r.problems.len(),
+                    r.stats.seconds
+                );
+            }
+            exit(!r.ok as i32);
         }
         HillCommand::Show { dir } => {
             let h = or_exit(Hill::open(std::path::Path::new(&dir)));

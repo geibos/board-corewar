@@ -286,3 +286,135 @@ fn concurrent_challenges_do_not_lose_each_other() {
     let v = json(&["hill", "show", s(&dir)]);
     assert_eq!(table(&v).len(), 4);
 }
+
+fn verify(dir: &Path) -> (Option<i32>, Value) {
+    let o = cw(&["hill", "verify", s(dir), "--json"]);
+    let v = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
+    (o.status.code(), v)
+}
+
+fn problems(v: &Value) -> Vec<String> {
+    v["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["kind"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Every file of a hill, to show that verify writes nothing.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for sub in [dir.to_path_buf(), dir.join("warriors")] {
+        for e in std::fs::read_dir(&sub).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_file() && !p.ends_with(".lock") {
+                out.push((p.clone(), std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn verified_hill(name: &str) -> PathBuf {
+    let dir = scratch(name);
+    init(&dir, &["--size", "3"]);
+    challenge(&dir, &TRIO);
+    challenge(&dir, &["testdata/edge.red"]);
+    dir
+}
+
+#[test]
+fn verify_passes_an_honest_hill_and_writes_nothing() {
+    let dir = verified_hill("verify-ok");
+    let before = snapshot(&dir);
+    let (code, v) = verify(&dir);
+    assert_eq!(code, Some(0), "{}", v);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["replayed"], 3, "three members, three matches");
+    assert!(problems(&v).is_empty());
+    assert_eq!(snapshot(&dir), before);
+}
+
+#[test]
+fn verify_catches_a_forged_result() {
+    let dir = verified_hill("verify-result");
+    let path = dir.join("results.json");
+    let mut r: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let first = r["matches"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap();
+    let (w1, w2) = (first["w1"].clone(), first["w2"].clone());
+    first["w1"] = w2;
+    first["w2"] = w1.clone();
+    if first["w1"] == w1 {
+        first["ties"] = serde_json::json!(first["ties"].as_u64().unwrap() + 1);
+    }
+    std::fs::write(&path, serde_json::to_string(&r).unwrap()).unwrap();
+    let (code, v) = verify(&dir);
+    assert_eq!(code, Some(1), "{}", v);
+    assert!(problems(&v).contains(&"result".to_owned()), "{}", v);
+}
+
+#[test]
+fn verify_catches_a_reordered_table() {
+    let dir = verified_hill("verify-order");
+    let path = dir.join("state.json");
+    let mut st: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    st["members"].as_array_mut().unwrap().reverse();
+    std::fs::write(&path, serde_json::to_string(&st).unwrap()).unwrap();
+    let (code, v) = verify(&dir);
+    assert_eq!(code, Some(1), "{}", v);
+    assert!(problems(&v).contains(&"ranking".to_owned()), "{}", v);
+}
+
+#[test]
+fn verify_catches_a_changed_source() {
+    let dir = verified_hill("verify-source");
+    let st: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("state.json")).unwrap()).unwrap();
+    let id = st["members"][0]["id"].as_str().unwrap();
+    let file = dir.join("warriors").join(format!("{}.red", id));
+    let src = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, src + "\n; changed\n").unwrap();
+    let (code, v) = verify(&dir);
+    assert_eq!(code, Some(1), "{}", v);
+    assert!(problems(&v).contains(&"source".to_owned()), "{}", v);
+}
+
+#[test]
+fn verify_catches_a_missing_or_extra_member() {
+    let dir = verified_hill("verify-members");
+    let path = dir.join("state.json");
+    let mut st: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    st["members"].as_array_mut().unwrap().pop();
+    std::fs::write(&path, serde_json::to_string(&st).unwrap()).unwrap();
+    let (code, v) = verify(&dir);
+    assert_eq!(code, Some(1), "{}", v);
+    assert!(problems(&v).contains(&"results".to_owned()), "{}", v);
+}
+
+#[test]
+fn verify_reports_results_from_other_rules() {
+    let dir = verified_hill("verify-rules");
+    let rules = dir.join("hill.toml");
+    let text = std::fs::read_to_string(&rules).unwrap();
+    std::fs::write(&rules, text.replace("rounds = 20", "rounds = 10")).unwrap();
+    let (code, v) = verify(&dir);
+    assert_eq!(code, Some(1), "{}", v);
+    assert!(problems(&v).contains(&"rules".to_owned()), "{}", v);
+    // challenge replays them, and then the hill verifies.
+    challenge(&dir, &[]);
+    assert_eq!(verify(&dir).0, Some(0));
+}
+
+#[test]
+fn verify_of_no_hill_is_an_error() {
+    let dir = scratch("verify-none");
+    let o = cw(&["hill", "verify", s(&dir)]);
+    assert_eq!(o.status.code(), Some(2));
+}

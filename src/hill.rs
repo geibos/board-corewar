@@ -276,7 +276,27 @@ pub struct Hill {
     pub rules: Rules,
     state: State,
     cache: Cache,
+    /// results.json was played under other rules; `cache` is then empty.
+    stale: bool,
     _lock: File,
+}
+
+/// One thing `verify` found wrong.
+#[derive(Serialize, Debug)]
+pub struct Problem {
+    /// rules, source, state, results, result, ranking or size.
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+#[derive(Serialize)]
+pub struct VerifyReport {
+    pub ok: bool,
+    pub members: usize,
+    /// Stored matches played again and compared.
+    pub replayed: usize,
+    pub problems: Vec<Problem>,
+    pub stats: Stats,
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -343,7 +363,8 @@ impl Hill {
             .map_err(|e| format!("{}: {}", rules_path.display(), e))?;
         let state: State = read_json(&dir.join("state.json"))?;
         let mut cache: Cache = read_json(&dir.join("results.json"))?;
-        if cache.fingerprint != rules.fingerprint() {
+        let stale = cache.fingerprint != rules.fingerprint();
+        if stale {
             cache = Cache {
                 fingerprint: rules.fingerprint(),
                 matches: BTreeMap::new(),
@@ -354,6 +375,7 @@ impl Hill {
             rules,
             state,
             cache,
+            stale,
             _lock: lock,
         })
     }
@@ -551,6 +573,148 @@ impl Hill {
         })
     }
 
+    /// Check the hill without changing it: every source against its id and
+    /// the rules, the results file against the members, every stored match
+    /// played again on `threads` threads, and the table against the rules.
+    /// Ages and arrival order are taken as recorded.
+    pub fn verify(&self, threads: usize) -> Result<VerifyReport> {
+        let t0 = std::time::Instant::now();
+        let cfg = self.rules.config();
+        let second = Config {
+            first_warrior: false,
+            ..cfg
+        };
+        let mut problems = Vec::new();
+        let mut problem = |kind, detail: String| problems.push(Problem { kind, detail });
+        let ms = &self.state.members;
+
+        let mut seen = std::collections::HashSet::new();
+        for m in ms {
+            if !seen.insert(m.id.as_str()) {
+                problem("state", format!("{} is listed twice", m.id));
+            }
+        }
+        let mut compiled: HashMap<&str, (Compiled, Compiled)> = HashMap::new();
+        for m in ms {
+            let path = self.source_path(&m.id);
+            let src = match read_source(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    problem("source", format!("{}: {}", path.display(), e));
+                    continue;
+                }
+            };
+            if warrior_id(&src) != m.id {
+                problem(
+                    "source",
+                    format!("{}: the text does not hash to its id", path.display()),
+                );
+                continue;
+            }
+            match (assemble(&src, &cfg), assemble(&src, &second)) {
+                (Ok(w1), Ok(w2)) => {
+                    if w1.name != m.name || w1.author != m.author {
+                        problem(
+                            "source",
+                            format!(
+                                "{}: recorded as {} by {}, assembles as {} by {}",
+                                m.id, m.name, m.author, w1.name, w1.author
+                            ),
+                        );
+                    }
+                    compiled.insert(&m.id, (Compiled::new(&w1), Compiled::new(&w2)));
+                }
+                (Err(e), _) | (_, Err(e)) => problem(
+                    "source",
+                    format!("{}: does not assemble under the rules: {}", m.id, e),
+                ),
+            }
+        }
+        if self.rules.size > 0 && ms.len() > self.rules.size {
+            problem(
+                "size",
+                format!("{} members on a hill of {}", ms.len(), self.rules.size),
+            );
+        }
+
+        let mut replayed = 0;
+        let mut instructions = 0;
+        if self.stale {
+            problem(
+                "rules",
+                format!(
+                    "results.json was played under other rules; `cw hill challenge {}` replays it",
+                    self.dir.display()
+                ),
+            );
+        } else {
+            let mut expected = std::collections::HashSet::new();
+            let mut jobs = Vec::new();
+            let mut stored = Vec::new();
+            let positions = cfg.core_size + 1 - 2 * cfg.min_distance;
+            for (i, x) in ms.iter().enumerate() {
+                for y in &ms[i + 1..] {
+                    let (a, b, key) = pairing(&x.id, &y.id);
+                    let Some(s) = self.cache.matches.get(&key) else {
+                        problem("results", format!("no result for {} vs {}", a, b));
+                        continue;
+                    };
+                    expected.insert(key.clone());
+                    if let (Some(ca), Some(cb)) = (compiled.get(a), compiled.get(b)) {
+                        jobs.push(Job {
+                            a: &ca.0,
+                            b: &cb.1,
+                            seed: seed(a, b, positions) as i32,
+                        });
+                        stored.push((key, *s));
+                    }
+                }
+            }
+            for key in self.cache.matches.keys() {
+                if !expected.contains(key) {
+                    problem(
+                        "results",
+                        format!("a result for {}, not a pair on the hill", key),
+                    );
+                }
+            }
+            let (again, n) = pool::play_all(&cfg, &jobs, cfg.rounds, threads);
+            instructions = n;
+            replayed = again.len();
+            for ((key, s), r) in stored.iter().zip(&again) {
+                if s != r {
+                    problem(
+                        "result",
+                        format!(
+                            "{}: recorded {} {} {}, played {} {} {}",
+                            key, s.w1, s.w2, s.ties, r.w1, r.w2, r.ties
+                        ),
+                    );
+                }
+            }
+            if let Ok(order) = self.ranked() {
+                let want: Vec<&str> = order.iter().map(|m| m.id.as_str()).collect();
+                let have: Vec<&str> = ms.iter().map(|m| m.id.as_str()).collect();
+                if want != have {
+                    problem(
+                        "ranking",
+                        format!("recorded order {:?}, the rules give {:?}", have, want),
+                    );
+                }
+            }
+        }
+        Ok(VerifyReport {
+            ok: problems.is_empty(),
+            members: ms.len(),
+            replayed,
+            problems,
+            stats: Stats {
+                instructions,
+                seconds: t0.elapsed().as_secs_f64(),
+            },
+        })
+    }
+
     /// The table as it stands; no match is played.
     pub fn show(&self) -> Result<ShowReport> {
         Ok(ShowReport {
@@ -609,9 +773,15 @@ impl Hill {
 
     /// Order the members: score, then the tie rule.
     fn rank(&mut self) -> Result<()> {
+        self.state.members = self.ranked()?;
+        Ok(())
+    }
+
+    /// The members in the order the rules rank them.
+    fn ranked(&self) -> Result<Vec<Member>> {
         let recs = self.records()?;
         let score: HashMap<&str, i64> = recs.iter().map(|r| (r.id.as_str(), r.score)).collect();
-        let mut ms = std::mem::take(&mut self.state.members);
+        let mut ms = self.state.members.clone();
         let newer = self.rules.tie_break == TieBreak::Newer;
         ms.sort_by(|x, y| {
             score[y.id.as_str()]
@@ -624,8 +794,7 @@ impl Hill {
                     }
                 })
         });
-        self.state.members = ms;
-        Ok(())
+        Ok(ms)
     }
 
     /// Drop members past the size.
