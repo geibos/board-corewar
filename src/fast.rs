@@ -335,21 +335,20 @@ impl Engine {
             }
             _ => {
                 let p = self.fold(pc + field as u32);
-                let ind;
-                match mode {
+                let ind = match mode {
                     A_PRE => {
                         let c = self.cell_mut(p);
                         c.a = if c.a == 0 { (cs - 1) as u16 } else { c.a - 1 };
-                        ind = c.a;
+                        c.a
                     }
                     B_PRE => {
                         let c = self.cell_mut(p);
                         c.b = if c.b == 0 { (cs - 1) as u16 } else { c.b - 1 };
-                        ind = c.b;
+                        c.b
                     }
-                    A_IND | A_POST => ind = self.cell(p).a,
-                    _ => ind = self.cell(p).b,
-                }
+                    A_IND | A_POST => self.cell(p).a,
+                    _ => self.cell(p).b,
+                };
                 let ptr = self.fold(field as u32 + ind as u32);
                 let at = self.fold(pc + ptr);
                 let c = self.cell(at);
