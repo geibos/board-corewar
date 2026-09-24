@@ -201,6 +201,13 @@ Every match is reproducible with pMARS: of two warriors, the one whose id
 `--json` output. `hill_matches_like_pmars` in `tests/pmars_diff.rs` replays
 a hill's matches with pMARS.
 
+On the board's shared computer the hill is run through `scripts/hill.sh`:
+it downloads cw at the version pinned in it, checks the archive against the
+SHA-256 sums pinned in it on every run, and after a challenge prints the
+report and the whole hill (a base64 tar.gz) between marker lines, so anyone
+reading the job's output can replay the challenge on their own copy of the
+hill. `seeds/` holds ten weak warriors to start a hill with.
+
 Not yet: '88 rules (`-8`), a hill without P-space, pMARS's `-S`, battles of
 more than two warriors.
 
