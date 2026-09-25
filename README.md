@@ -111,6 +111,10 @@ cw tournament FILE... [--rounds N] [--jobs N] [--lanes 1|2]
                                   --jobs N: matches on N threads (0: one per CPU)
 cw battle A B --pos N [--first 0|1]
                                   one battle, like `pmars -b -r 1 -F N A B`
+cw trace A B [--rounds N] [--seed S] [--record R,...] [--every N]
+                                  a match as JSON: every round's summary, and for the
+                                  --record rounds a frame every N cycles of who wrote
+                                  which cells (the plain engine; placed like cw pair)
 cw help [COMMAND]                 the flags in full
 ```
 
@@ -144,6 +148,13 @@ differs between runs. A round robin, abridged:
   "stats": { "instructions": 468096011, "seconds": 2.98 }
 }
 ```
+
+`cw trace` plays the match on the plain engine (`src/mars.rs`), slower than
+`cw pair` but the same results, checked in the tests against `cw pair` and
+against a hill's stored matches. Warrior 0 is A. A cycle is one instruction
+of each warrior; a tie ends on the last cycle. To trace a hill match, put the
+warrior with the smaller id first and pass `--seed` = the first 8 bytes of
+sha256("A_ID:B_ID") as a big-endian number, mod core + 1 − 2 × distance.
 
 ## Hill
 
