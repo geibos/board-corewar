@@ -454,5 +454,9 @@ fn a_hill_match_traces_to_its_stored_score() {
         t["score"].clone()
     };
     assert_eq!(&traced(seed), stored);
-    assert_ne!(&traced((seed + 1) % positions), stored, "the score must depend on the seed");
+    assert_ne!(
+        &traced((seed + 1) % positions),
+        stored,
+        "the score must depend on the seed"
+    );
 }

@@ -311,23 +311,39 @@ impl Mars {
                     }
                 };
                 let c = &mut self.core[t];
-                let alive = match m {
-                    Modifier::A => f(bir.a, air.a).map(|v| c.a = v).is_some(),
-                    Modifier::B => f(bir.b, air.b).map(|v| c.b = v).is_some(),
-                    Modifier::AB => f(bir.b, air.a).map(|v| c.b = v).is_some(),
-                    Modifier::BA => f(bir.a, air.b).map(|v| c.a = v).is_some(),
+                // (a half was written, every half was written): a division
+                // by zero kills the process and leaves its half unwritten.
+                let (wrote, alive) = match m {
+                    Modifier::A => {
+                        let x = f(bir.a, air.a).map(|v| c.a = v).is_some();
+                        (x, x)
+                    }
+                    Modifier::B => {
+                        let x = f(bir.b, air.b).map(|v| c.b = v).is_some();
+                        (x, x)
+                    }
+                    Modifier::AB => {
+                        let x = f(bir.b, air.a).map(|v| c.b = v).is_some();
+                        (x, x)
+                    }
+                    Modifier::BA => {
+                        let x = f(bir.a, air.b).map(|v| c.a = v).is_some();
+                        (x, x)
+                    }
                     Modifier::F | Modifier::I => {
                         let x = f(bir.a, air.a).map(|v| c.a = v).is_some();
                         let y = f(bir.b, air.b).map(|v| c.b = v).is_some();
-                        x && y
+                        (x || y, x && y)
                     }
                     Modifier::X => {
                         let x = f(bir.a, air.b).map(|v| c.a = v).is_some();
                         let y = f(bir.b, air.a).map(|v| c.b = v).is_some();
-                        x && y
+                        (x || y, x && y)
                     }
                 };
-                self.note(t);
+                if wrote {
+                    self.note(t);
+                }
                 if alive {
                     queue(self, next);
                 }

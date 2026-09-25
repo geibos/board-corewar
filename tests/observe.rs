@@ -97,3 +97,25 @@ proptest! {
         prop_assert_eq!(obs.movers.first().copied(), Some(first));
     }
 }
+
+/// DIV and MOD by zero kill the process and write nothing: no cell is
+/// reported, or a replay would show a write that never happened.
+#[test]
+fn a_division_by_zero_writes_nothing() {
+    let c = cfg();
+    let div = assemble(";redcode-94\n;name div\n;author t\n DIV.AB #0, 3\n", &c).unwrap();
+    let imp = assemble(include_str!("../testdata/imp.red"), &c).unwrap();
+    let mut m = Mars::new(&c, 2);
+    m.begin_match(&[&div, &imp]);
+    struct FirstStep(Option<Vec<u32>>);
+    impl Observer for FirstStep {
+        fn after_step(&mut self, _mars: &Mars, _w: usize, written: &[u32], _step: u64) {
+            if self.0.is_none() {
+                self.0 = Some(written.to_vec());
+            }
+        }
+    }
+    let mut obs = FirstStep(None);
+    m.round_observed(&c, [&div, &imp], [0, 400], 0, &mut obs);
+    assert_eq!(obs.0, Some(vec![]), "DIV.AB #0 wrote nothing");
+}
