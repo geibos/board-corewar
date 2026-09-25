@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 425c6747692ee4687e11796918a2f0a1b4071f3d520b81965e3abd53535b707d # shrinks to (ca, sa) = ([Spec { op: Dat, modifier: A, a_mode: Immediate, a: 1, b_mode: Immediate, b: 6 }, Spec { op: Mov, modifier: BA, a_mode: BIndirect, a: 90, b_mode: BPredec, b: 0 }], 1), (cb, sb) = ([Spec { op: Dat, modifier: F, a_mode: BIndirect, a: -10, b_mode: AIndirect, b: -8 }, Spec { op: Spl, modifier: BA, a_mode: BIndirect, a: -2, b_mode: BPredec, b: -3 }, Spec { op: Djn, modifier: A, a_mode: APredec, a: 2, b_mode: APredec, b: 4 }, Spec { op: Jmz, modifier: B, a_mode: BIndirect, a: 6555, b_mode: BPredec, b: -3 }, Spec { op: Spl, modifier: X, a_mode: BIndirect, a: -88, b_mode: AIndirect, b: 3 }, Spec { op: Dat, modifier: X, a_mode: APostinc, a: 0, b_mode: BIndirect, b: -1 }, Spec { op: Stp, modifier: AB, a_mode: BPredec, a: 6, b_mode: Direct, b: 5469 }, Spec { op: Nop, modifier: I, a_mode: Immediate, a: 1711, b_mode: BPostinc, b: -33 }, Spec { op: Spl, modifier: AB, a_mode: Direct, a: 6484, b_mode: Immediate, b: 9 }, Spec { op: Mov, modifier: F, a_mode: BPredec, a: 4406, b_mode: Direct, b: -5 }, Spec { op: Div, modifier: A, a_mode: BPredec, a: -1, b_mode: Direct, b: -7 }], 4), pos = 699, first = 0
