@@ -11,6 +11,7 @@ use corewar::multi::{Job, Multi};
 use corewar::pool;
 use corewar::redcode::{Listing, Warrior};
 use corewar::report::{self, Params as ParamsReport, Stats, WarriorInfo};
+use corewar::trace;
 use std::process::exit;
 
 #[derive(Parser)]
@@ -51,6 +52,27 @@ enum Command {
         /// Position seed: pMARS's -F minus the distance.
         #[arg(long, default_value_t = 1)]
         seed: u32,
+        #[command(flatten)]
+        params: Params,
+    },
+    /// A match on the plain engine with the core's writes recorded, as one
+    /// JSON document (always, --json or not): a summary of every round and,
+    /// for the rounds in --record, a frame every --every cycles of which
+    /// warrior wrote which cells. Placed like `cw pair`; warrior 0 is A.
+    Trace {
+        a: String,
+        b: String,
+        #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u32).range(1..))]
+        rounds: u32,
+        /// Position seed, as in `cw pair`.
+        #[arg(long, default_value_t = 1)]
+        seed: u32,
+        /// Rounds to record, from 1: `--record 1,17,117`.
+        #[arg(long, value_delimiter = ',')]
+        record: Vec<u32>,
+        /// Cycles between frames.
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
+        every: u32,
         #[command(flatten)]
         params: Params,
     },
@@ -281,6 +303,32 @@ fn main() {
                 dt,
                 mars.steps as f64 / dt / 1e6
             );
+        }
+        Command::Trace {
+            a,
+            b,
+            rounds,
+            seed,
+            record,
+            every,
+            params,
+        } => {
+            if let Some(r) = record.iter().find(|&&r| r == 0 || r > rounds) {
+                eprintln!("--record: round {} is not in 1..={}", r, rounds);
+                exit(2);
+            }
+            let cfg = params.config(rounds);
+            let (wa, wb) = (load(&a, &cfg), load(&b, &second(&cfg)));
+            let t = trace::trace(&cfg, &wa, &wb, rounds, seed as i32, &record, every);
+            let doc = report::Traced {
+                params: ParamsReport::from(&cfg),
+                warriors: [WarriorInfo::new(&a, &wa), WarriorInfo::new(&b, &wb)],
+                seed,
+                score: t.score,
+                rounds: t.rounds,
+                recorded: t.recorded,
+            };
+            println!("{}", serde_json::to_string(&doc).expect("serialize"));
         }
         Command::Battle {
             a,

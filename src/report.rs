@@ -142,3 +142,15 @@ pub struct Tournament {
     pub standings: Vec<Standing>,
     pub stats: Stats,
 }
+
+/// `cw trace`: the match, a summary of every round and the recorded
+/// rounds' frames (see `crate::trace`). Always JSON.
+#[derive(Serialize)]
+pub struct Traced {
+    pub params: Params,
+    pub warriors: [WarriorInfo; 2],
+    pub seed: u32,
+    pub score: Score,
+    pub rounds: Vec<crate::trace::RoundSummary>,
+    pub recorded: Vec<crate::trace::Recording>,
+}

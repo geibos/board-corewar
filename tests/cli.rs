@@ -259,3 +259,69 @@ fn check_refuses_an_oversized_file_without_assembling_it() {
     let j: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert!(j[0]["error"].as_str().unwrap().contains("bytes"), "{}", j);
 }
+
+fn trace_json(args: &[&str]) -> serde_json::Value {
+    let mut all = vec!["trace"];
+    all.extend_from_slice(args);
+    let o = cw(&all);
+    assert!(o.status.success(), "{:?}", o);
+    serde_json::from_slice(&o.stdout).expect("stdout is one JSON document")
+}
+
+/// The plain engine behind `cw trace` scores every match like the fast one
+/// behind `cw pair`, the second warrior assembled without registers W/S.
+#[test]
+fn trace_scores_like_pair() {
+    for (a, b, seed) in [
+        ("seeds/mice.red", "seeds/imp.red", "1234"),
+        ("seeds/scanner.red", "seeds/sweeper.red", "77"),
+        ("testdata/dwarf.red", "testdata/registers.red", "3900"),
+    ] {
+        let t = trace_json(&[a, b, "--rounds", "20", "--seed", seed]);
+        let p = json(&["pair", a, b, "--rounds", "20", "--seed", seed]);
+        assert_eq!(t["score"], p["result"], "{} vs {}", a, b);
+        assert_eq!(t["rounds"].as_array().unwrap().len(), 20);
+        assert_eq!(t["warriors"][1]["file"], b);
+    }
+}
+
+#[test]
+fn trace_records_each_round_once_in_order() {
+    let t = trace_json(&[
+        "seeds/mice.red",
+        "seeds/imp.red",
+        "--rounds",
+        "5",
+        "--record",
+        "3,1,3",
+        "--every",
+        "100",
+    ]);
+    let rec = t["recorded"].as_array().unwrap();
+    let rounds: Vec<u64> = rec.iter().map(|r| r["round"].as_u64().unwrap()).collect();
+    assert_eq!(rounds, [1, 3]);
+    for r in rec {
+        let end = r["end"]["cycle"].as_u64().unwrap();
+        for f in r["frames"].as_array().unwrap() {
+            let c = f["cycle"].as_u64().unwrap();
+            assert!(c % 100 == 0 || c == end);
+        }
+    }
+}
+
+#[test]
+fn trace_rejects_a_round_outside_the_match() {
+    for record in ["6", "0"] {
+        let o = cw(&[
+            "trace",
+            "seeds/mice.red",
+            "seeds/imp.red",
+            "--rounds",
+            "5",
+            "--record",
+            record,
+        ]);
+        assert_eq!(o.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&o.stderr).contains("--record"));
+    }
+}
