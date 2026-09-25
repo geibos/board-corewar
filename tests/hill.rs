@@ -421,13 +421,15 @@ fn verify_of_no_hill_is_an_error() {
 
 /// A hill's stored match replays with `cw trace` to the same score: the
 /// first file is the smaller id, the seed is sha256("a:b")[..8] mod
-/// positions. This is how a hill match is traced for a replay.
+/// positions. This is how a hill match is traced for a replay. The pair's
+/// score depends on the seed, so a wrong seed would show: the next seed
+/// must give another score.
 #[test]
 fn a_hill_match_traces_to_its_stored_score() {
     use sha2::{Digest, Sha256};
     let dir = scratch("trace");
     init(&dir, &[]);
-    challenge(&dir, &["seeds/mice.red", "seeds/scanner.red"]);
+    challenge(&dir, &["seeds/hammer.red", "seeds/stunner.red"]);
     let results: Value =
         serde_json::from_slice(&std::fs::read(dir.join("results.json")).unwrap()).unwrap();
     let (key, stored) = results["matches"]
@@ -441,11 +443,16 @@ fn a_hill_match_traces_to_its_stored_score() {
     let d = Sha256::digest(key.as_bytes());
     let mut n = [0u8; 8];
     n.copy_from_slice(&d[..8]);
-    let seed = (u64::from_be_bytes(n) % positions).to_string();
+    let seed = u64::from_be_bytes(n) % positions;
     let fa = dir.join("warriors").join(format!("{}.red", a));
     let fb = dir.join("warriors").join(format!("{}.red", b));
-    let o = cw(&["trace", s(&fa), s(&fb), "--rounds", "20", "--seed", &seed]);
-    assert!(o.status.success(), "{:?}", o);
-    let t: Value = serde_json::from_slice(&o.stdout).unwrap();
-    assert_eq!(&t["score"], stored);
+    let traced = |seed: u64| -> Value {
+        let seed = seed.to_string();
+        let o = cw(&["trace", s(&fa), s(&fb), "--rounds", "20", "--seed", &seed]);
+        assert!(o.status.success(), "{:?}", o);
+        let t: Value = serde_json::from_slice(&o.stdout).unwrap();
+        t["score"].clone()
+    };
+    assert_eq!(&traced(seed), stored);
+    assert_ne!(&traced((seed + 1) % positions), stored, "the score must depend on the seed");
 }
