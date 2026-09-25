@@ -27,6 +27,16 @@ pub enum Outcome {
     Tie,
 }
 
+/// Watches a round played by `Mars::round_observed`.
+pub trait Observer {
+    /// The warriors are loaded; nothing has moved yet.
+    fn loaded(&mut self, _mars: &Mars) {}
+    /// Warrior `w` executed instruction number `step` of the round (from
+    /// 1), which wrote to the cells in `written`, in order, repeats
+    /// possible.
+    fn after_step(&mut self, mars: &Mars, w: usize, written: &[u32], step: u64);
+}
+
 pub struct Mars {
     cs: u32,
     max_processes: usize,
@@ -40,6 +50,12 @@ pub struct Mars {
     pspace_size: u32,
     /// Instructions executed since creation; for benchmarks.
     pub steps: u64,
+    /// Cells written by the instruction being executed, while a round is
+    /// observed; `None` otherwise, and then nothing is kept.
+    record: Option<Vec<u32>>,
+    /// Instructions executed in the last round, the one that ended it
+    /// included.
+    pub last_round_steps: u64,
 }
 
 impl Mars {
@@ -54,6 +70,8 @@ impl Mars {
             last_result: vec![cfg.core_size - 1; warriors],
             pspace_size: cfg.pspace_size(),
             steps: 0,
+            record: None,
+            last_round_steps: 0,
         }
     }
 
@@ -110,6 +128,12 @@ impl Mars {
         }
     }
     #[inline]
+    fn note(&mut self, at: usize) {
+        if let Some(r) = &mut self.record {
+            r.push(at as u32);
+        }
+    }
+    #[inline]
     fn inc(&self, x: u32) -> u32 {
         self.add(x, 1)
     }
@@ -160,8 +184,14 @@ impl Mars {
         if mode != Mode::Direct {
             let p = self.add(pc, field) as usize;
             match mode {
-                Mode::APredec => self.core[p].a = self.dec(self.core[p].a),
-                Mode::BPredec => self.core[p].b = self.dec(self.core[p].b),
+                Mode::APredec => {
+                    self.core[p].a = self.dec(self.core[p].a);
+                    self.note(p);
+                }
+                Mode::BPredec => {
+                    self.core[p].b = self.dec(self.core[p].b);
+                    self.note(p);
+                }
                 _ => {}
             }
             let via_a = matches!(mode, Mode::AIndirect | Mode::APredec | Mode::APostinc);
@@ -187,6 +217,7 @@ impl Mars {
             } else {
                 self.core[p].b = self.inc(self.core[p].b);
             }
+            self.note(p);
         }
         (ptr, at, cell)
     }
@@ -238,6 +269,7 @@ impl Mars {
                         ..src
                     };
                 }
+                self.note(t);
                 queue(self, next);
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul => {
@@ -264,6 +296,7 @@ impl Mars {
                         c.b = f(bir.b, air.a);
                     }
                 }
+                self.note(t);
                 queue(self, next);
             }
             Opcode::Div | Opcode::Mod => {
@@ -294,6 +327,7 @@ impl Mars {
                         x && y
                     }
                 };
+                self.note(t);
                 if alive {
                     queue(self, next);
                 }
@@ -335,6 +369,7 @@ impl Mars {
                         bir.a != 0 || bir.b != 0
                     }
                 };
+                self.note(t);
                 queue(self, if nz { jump } else { next });
             }
             Opcode::Spl => {
@@ -363,6 +398,7 @@ impl Mars {
                     Modifier::A | Modifier::BA => self.core[t].a = v,
                     _ => self.core[t].b = v,
                 }
+                self.note(t);
                 queue(self, next);
             }
             Opcode::Stp => {
@@ -422,19 +458,60 @@ impl Mars {
         positions: [u32; 2],
         first: usize,
     ) -> Outcome {
+        self.play_round(cfg, warriors, positions, first, None)
+    }
+
+    /// `round`, telling `observer` about every instruction and the cells it
+    /// wrote. Same outcome, same core, same P-space as `round`.
+    pub fn round_observed(
+        &mut self,
+        cfg: &Config,
+        warriors: [&Warrior; 2],
+        positions: [u32; 2],
+        first: usize,
+        observer: &mut dyn Observer,
+    ) -> Outcome {
+        self.record = Some(Vec::new());
+        let o = self.play_round(cfg, warriors, positions, first, Some(observer));
+        self.record = None;
+        o
+    }
+
+    fn play_round(
+        &mut self,
+        cfg: &Config,
+        warriors: [&Warrior; 2],
+        positions: [u32; 2],
+        first: usize,
+        mut observer: Option<&mut dyn Observer>,
+    ) -> Outcome {
         self.load(&warriors, &positions);
+        if let Some(o) = observer.as_deref_mut() {
+            o.loaded(self);
+        }
         let mut steps = cfg.max_cycles as u64 * 2;
         let mut w = first;
+        let mut done = 0u64;
         let outcome = loop {
             if steps == 0 {
                 break Outcome::Tie;
             }
-            if !self.step(w) {
+            let alive = self.step(w);
+            done += 1;
+            if let Some(o) = observer.as_deref_mut() {
+                let written = self.record.take().unwrap_or_default();
+                o.after_step(self, w, &written, done);
+                let mut buf = written;
+                buf.clear();
+                self.record = Some(buf);
+            }
+            if !alive {
                 break Outcome::Win(1 - w);
             }
             w = 1 - w;
             steps -= 1;
         };
+        self.last_round_steps = done;
         match outcome {
             Outcome::Win(x) => {
                 self.last_result[x] = 1;
