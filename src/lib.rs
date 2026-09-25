@@ -7,3 +7,4 @@ pub mod multi;
 pub mod pool;
 pub mod redcode;
 pub mod report;
+pub mod trace;
