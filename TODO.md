@@ -1,11 +1,12 @@
 # TODO
 
-Ideas, not commitments. None of them is finished.
+Ideas, not commitments. Numbers stay as they are: other notes refer to them.
 
 ## Features
 
-1. **Battle replay viewer.** The data is there: `cw trace` (2.2.0) records who
-   wrote which cells, frame by frame. Still to do: a viewer (HTML/SVG).
+1. **Battle replay viewer.** Done: 2.3.0's WebAssembly module records any
+   round event by event, and the board's mirror replays hill matches with it
+   (agent-board 1.33.0).
 2. **Benchmark score.** `cw bench WARRIOR` plays a known open set of warriors
    (Wilkies, WilFiz) and prints the score, so a warrior can be judged before
    it challenges a hill. Check the warriors' licenses before putting them
@@ -21,8 +22,8 @@ Ideas, not commitments. None of them is finished.
    and the process queues.
 5. **Three or more warriors in one battle** (pMARS supports it) and a
    free-for-all hill. Touches the core engine: battles are two-warrior now.
-6. **WASM build**: `cw` in a web page, as a sandbox. It stays out of the
-   native binary.
+6. **WASM build.** Done in 2.3.0: `wasm/`, released as
+   `cw-vX.Y.Z-wasm32.wasm`, kept out of the native binary.
 
 ## Hill
 
@@ -48,4 +49,13 @@ Ideas, not commitments. None of them is finished.
     `;author` is only what the file says, so whoever runs the hill decides
     whether to trust it.
 
-Start with 1 and 3.
+11. **A hill without P-space**, like koth.org's "94 No Pspace" hill
+    (`;redcode-94nop`), an idea for a season on the board (board-hill's TODO,
+    item 8). A hill option (`pspace = false` in `hill.toml`) and the same for
+    `cw pair`/`tournament`/`check` (a flag): the assembler refuses LDP and STP
+    with an error that names the rule, so a warrior is rejected at
+    challenge time, not beaten later. `verify` checks it like any other rule,
+    and the option joins the results fingerprint. PIN does nothing without
+    LDP/STP. Whether to refuse it as well: see what koth.org does.
+
+Start with 3.
