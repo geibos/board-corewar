@@ -208,6 +208,17 @@ impl Mars {
         self.queues[w].len()
     }
 
+    /// Warrior `w`'s processes, oldest first: the first is the one that
+    /// executes next.
+    pub fn queue(&self, w: usize) -> impl DoubleEndedIterator<Item = u32> + ExactSizeIterator + '_ {
+        self.queues[w].iter().copied()
+    }
+
+    /// P-space cell `idx` of warrior `w`, as LDP would read it.
+    pub fn pspace(&self, w: usize, idx: u32) -> u32 {
+        self.get_pspace(w, idx)
+    }
+
     /// Evaluate one operand: (pointer offset, address of the cell it points
     /// to, snapshot of that cell's A and B numbers at evaluation time).
     #[inline]

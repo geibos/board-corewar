@@ -119,3 +119,50 @@ fn a_division_by_zero_writes_nothing() {
     m.round_observed(&c, [&div, &imp], [0, 400], 0, &mut obs);
     assert_eq!(obs.0, Some(vec![]), "DIV.AB #0 wrote nothing");
 }
+
+/// Each warrior's process queue, oldest first: the first is the next to
+/// execute. A replay draws these as the warriors' instruction pointers. SPL
+/// queues the next cell, then its target; a process that executes DAT is
+/// gone.
+#[test]
+fn the_queue_is_the_processes_in_order() {
+    let c = cfg();
+    let spl = assemble(
+        ";redcode-94\n;name spl\n;author t\n SPL.B $2, $0\n DAT.F $0, $0\n JMP.B $0, $0\n",
+        &c,
+    )
+    .unwrap();
+    let imp = assemble(include_str!("../testdata/imp.red"), &c).unwrap();
+    let mut m = Mars::new(&c, 2);
+    m.load(&[&spl, &imp], &[0, 400]);
+    assert_eq!(m.queue(0).collect::<Vec<_>>(), vec![0]);
+    assert_eq!(m.queue(1).collect::<Vec<_>>(), vec![400 + imp.start]);
+    m.step(0);
+    assert_eq!(m.queue(0).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(m.queue(0).len(), m.processes(0));
+    m.step(0);
+    assert_eq!(m.queue(0).collect::<Vec<_>>(), vec![2], "the DAT took one");
+    assert_eq!(m.queue(1).collect::<Vec<_>>(), vec![400 + imp.start]);
+}
+
+/// P-space as LDP reads it: cell 0 holds the result of the previous round
+/// (CORESIZE-1 before the first), the others what STP left; the index wraps.
+#[test]
+fn pspace_reads_like_ldp() {
+    use corewar::mars::Outcome;
+    let c = cfg();
+    let stp = assemble(
+        ";redcode-94\n;name stp\n;author t\n STP.AB #7, #3\n DAT.F $0, $0\n",
+        &c,
+    )
+    .unwrap();
+    let imp = assemble(include_str!("../testdata/imp.red"), &c).unwrap();
+    let mut m = Mars::new(&c, 2);
+    m.begin_match(&[&stp, &imp]);
+    assert_eq!(m.pspace(0, 0), c.core_size - 1);
+    assert_eq!(m.pspace(0, 3), 0);
+    assert_eq!(m.round(&c, [&stp, &imp], [0, 400], 0), Outcome::Win(1));
+    assert_eq!(m.pspace(0, 3), 7);
+    assert_eq!(m.pspace(0, 3 + c.pspace_size()), 7);
+    assert_eq!((m.pspace(0, 0), m.pspace(1, 0)), (0, 1), "lost, won");
+}

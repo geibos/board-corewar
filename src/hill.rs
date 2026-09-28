@@ -157,9 +157,10 @@ fn pairing<'a>(x: &'a str, y: &'a str) -> (&'a str, &'a str, String) {
     (a, b, format!("{}:{}", a, b))
 }
 
-/// The position seed of a match, from both ids: pMARS's -F is
-/// seed + distance.
-fn seed(a: &str, b: &str, positions: u32) -> u32 {
+/// The position seed of a match, from both ids, `a` the one that sorts
+/// first (it moves first in the first round): pMARS's -F is seed + distance,
+/// and `positions` is CORESIZE + 1 - 2 * distance.
+pub fn seed(a: &str, b: &str, positions: u32) -> u32 {
     let d = Sha256::digest(format!("{}:{}", a, b).as_bytes());
     let mut n = [0u8; 8];
     n.copy_from_slice(&d[..8]);
