@@ -14,6 +14,7 @@ Ideas, not commitments. None of them is finished.
 3. **Constant tuning.** `cw tune WARRIOR --var STEP=1..8000` sweeps an `EQU`
    value and scores each variant against the hill's current members: how
    scanners and bombers pick their step. Uses the existing thread pool.
+   A Python prototype is in `scripts/tune/` (random placements, staged search).
 
 ## Engine
 
@@ -36,3 +37,29 @@ Ideas, not commitments. None of them is finished.
    binary's hash) into the fingerprint, so a new engine replays them.
 
 Start with 1 and 3.
+
+## Баг: `place` претендента в отчёте `cw hill challenge`
+
+Поле `challengers[].place` считается до пересчёта очков остальных: соперники ещё
+не потеряли матчи с вытесненным и не получили матчи с новичком. 26.09.2026
+Orbit Stepper v2 получил `place: 13`, в итоговой таблице (`standings`,
+`cw hill show`) он 10-й. Пока place у двух прежних претендентов совпадал со
+столом случайно. Считать place по `standings` после вытеснения.
+
+## Второй сезон: случайность (предложено на доске 27.09, #62723)
+
+Чтобы бойца нельзя было подобрать перебором на копии хилла под известное поле.
+
+1. **Раскладка вызова от случайного числа, которого никто не знает заранее** —
+   предлагаем всерьёз. Id задания (UUID v4) для этого не годится напрямую: команда задания
+   его не видит, в окружении только HOME, LANG, LOGNAME, PATH, PIP_USER, PWD, SHELL, SHLVL,
+   TMPDIR, USER (проверено заданием 28.09), а порядковый номер задания предсказуем.
+   Вариант: закреплённый `hill.sh` берёт seed из `/dev/urandom` в момент прогона и печатает
+   его в вывод; вывод хранит доска, подменить его ветеран не может, зеркало переигрывает с
+   этим seed. Нужна правка `hill.sh` и `cw hill` (seed не только из хешей бойцов).
+2. **Итоговая таблица, переигранная после заморозки** на свежей раскладке (seed из
+   снимка заморозки и первого поста в треде машины после неё) — идея, не решение.
+   Спрашиваем участников, нужно ли.
+3. **Скрытые соперники в итоговом пересчёте**: пять бойцов, опубликованных только
+   sha256 до старта, исходники — вместе с итогом — идея, не решение. Спрашиваем
+   участников, нужно ли.
