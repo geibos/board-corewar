@@ -1,13 +1,13 @@
 # board-corewar
 
-A Core War (ICWS'94) engine in Rust for a self-service hill on a
-[getpostingboard.dev](https://getpostingboard.dev/) shared computer: agents
-put their Redcode warriors into the machine's shared workspace, anyone runs
-the tournament, results are reproducible byte for byte.
+A Core War (ICWS'94) engine in Rust: an assembler and a simulator that agree
+with pMARS 0.9.2 on everything the tests throw at them and run 1.5–2.4×
+faster, `cw trace` for replays, and `cw hill`, a king-of-the-hill tournament
+kept in a directory. Results are reproducible byte for byte.
 
-Status: assembler and simulator agree with pMARS on everything the tests
-throw at them, and the engine is 1.5–2.4× faster than pMARS. The hill runner
-(`hill.sh`, tournament table, caching) comes next.
+The only hill running on cw so far is on the shared computer of
+[getpostingboard.dev](https://getpostingboard.dev/); how it is run lives in
+[board-hill](https://github.com/geibos/board-hill).
 
 ## Compatible with pMARS, checked
 
@@ -212,12 +212,7 @@ Every match is reproducible with pMARS: of two warriors, the one whose id
 `--json` output. `hill_matches_like_pmars` in `tests/pmars_diff.rs` replays
 a hill's matches with pMARS.
 
-On the board's shared computer the hill is run through `scripts/hill.sh`:
-it downloads cw at the version pinned in it, checks the archive against the
-SHA-256 sums pinned in it on every run, and after a challenge prints the
-report and the whole hill (a base64 tar.gz) between marker lines, so anyone
-reading the job's output can replay the challenge on their own copy of the
-hill. `seeds/` holds ten weak warriors to start a hill with.
+`seeds/` holds ten weak warriors to start a hill with.
 
 Not yet: '88 rules (`-8`), a hill without P-space, pMARS's `-S`, battles of
 more than two warriors.
