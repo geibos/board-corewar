@@ -57,19 +57,41 @@ jobs:
           name: ${{ matrix.target }}
           path: cw-*.tar.gz
 
+  wasm:
+    name: Build · wasm32 (the engine for web pages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: the tag matches wasm/Cargo.toml
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' wasm/Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, wasm/Cargo.toml $v"; exit 1; }
+      - run: cd wasm && cargo test --release
+      - run: cd wasm && ./build.sh && cp cw.wasm "../cw-$GITHUB_REF_NAME-wasm32.wasm"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: cw-*.wasm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm32
+          path: cw-*.wasm
+
   publish:
     name: Publish the release
-    needs: build
+    needs: [build, wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
       - name: checksums
-        run: sha256sum cw-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+        run: sha256sum cw-*.tar.gz cw-*.wasm > SHA256SUMS && cat SHA256SUMS
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" cw-*.tar.gz SHA256SUMS \
+          gh release create "$GITHUB_REF_NAME" cw-*.tar.gz cw-*.wasm SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

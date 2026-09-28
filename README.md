@@ -217,6 +217,23 @@ a hill's matches with pMARS.
 Not yet: '88 rules (`-8`), a hill without P-space, pMARS's `-S`, battles of
 more than two warriors.
 
+## In a web page
+
+`wasm/` builds the plain engine and the assembler into a WebAssembly module
+of about 210 KB (`wasm/build.sh`, needs the `wasm32-unknown-unknown`
+target). There is no bindings generator: a few C functions over one session,
+documented at the top of `wasm/src/lib.rs`. The module assembles a source
+and gives its hill id, plays a match and summarises each round as `cw trace`
+does, and records any round of a match after playing the rounds before it,
+so that P-space is what it was. A recording is the core as loaded, then one
+event per instruction: the cell it executed (the head of its warrior's
+queue), the cells it added to that queue, and each cell it wrote with what
+the cell holds afterwards. From that a page can show every process of both
+warriors and every cell at any cycle. The tests in `wasm/` check each
+recorded round against `cw trace`, and that replaying its events ends on the
+core the round ended with. Releases carry the module as
+`cw-vX.Y.Z-wasm32.wasm`, attested like the binaries.
+
 ## Redcode accepted
 
 Everything pMARS 0.9.2 accepts with ICWS'94 extensions, the way pMARS
@@ -256,7 +273,8 @@ limits of its own, and there it rejects what pMARS would accept:
 
 The assembler runs on a thread of its own with a 64 MiB stack, so how deep
 a source may nest is set by the limit above, not by the caller's stack, and
-is the same in debug and release builds. Symbols are looked up through a
+is the same in debug and release builds. WebAssembly in a page has no
+threads: the module in `wasm/` is linked with a 64 MiB stack instead. Symbols are looked up through a
 hash index instead of pMARS's list scan: tens of thousands of labels took
 seconds. `tests/hostile.rs` pins each case and runs random garbage through
 the assembler with a time limit.

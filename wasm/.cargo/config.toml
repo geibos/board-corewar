@@ -1,0 +1,6 @@
+# The assembler runs on its own 64 MiB thread natively (corewar::asm::ASM_STACK)
+# so that its depth limit, not the stack, stops a deeply nested source. A page
+# has no threads: the module's one stack gets the same size. A test checks
+# that this number is ASM_STACK.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=67108864"]

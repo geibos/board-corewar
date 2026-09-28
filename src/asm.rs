@@ -53,8 +53,10 @@ pub const MAX_SOURCE_BYTES: usize = 1 << 20;
 const MAX_DEPTH: u32 = 10_000;
 
 /// The stack of the thread assembly runs on: MAX_DEPTH levels with room to
-/// spare in a debug build. Only the pages touched are ever allocated.
-const ASM_STACK: usize = 64 << 20;
+/// spare in a debug build. Only the pages touched are ever allocated. A
+/// WebAssembly module, which assembles on its only thread, is linked with a
+/// stack this big.
+pub const ASM_STACK: usize = 64 << 20;
 
 /// Lines read while expanding FOR blocks and multi-line EQUs. The output a
 /// program can use is 1000 lines; the expansion guard below stops at
@@ -208,20 +210,21 @@ pub fn assemble_full(src: &str, cfg: &Config) -> Result<Assembly, Vec<AsmError>>
             warning: false,
         }]);
     }
+    let here = || {
+        let mut a = Asm::new(cfg);
+        let warrior = a.run(src);
+        (warrior, a.diags)
+    };
     // On a thread of its own, so that the depth limit, not whoever called,
     // decides how deep a source may nest.
-    let run = std::thread::scope(|s| {
+    #[cfg(not(target_family = "wasm"))]
+    let (warrior, diags) = match std::thread::scope(|s| {
         std::thread::Builder::new()
             .name("assembler".into())
             .stack_size(ASM_STACK)
-            .spawn_scoped(s, || {
-                let mut a = Asm::new(cfg);
-                let warrior = a.run(src);
-                (warrior, a.diags)
-            })
+            .spawn_scoped(s, here)
             .map(|h| h.join())
-    });
-    let (warrior, diags) = match run {
+    }) {
         Ok(Ok(done)) => done,
         Ok(Err(panic)) => std::panic::resume_unwind(panic),
         Err(e) => {
@@ -232,6 +235,10 @@ pub fn assemble_full(src: &str, cfg: &Config) -> Result<Assembly, Vec<AsmError>>
             }])
         }
     };
+    // WebAssembly in a browser has no threads. There the stack is the
+    // module's own, and whoever links it gives it ASM_STACK (wasm/ does).
+    #[cfg(target_family = "wasm")]
+    let (warrior, diags) = here();
     let (errors, warnings): (Vec<AsmError>, Vec<AsmError>) =
         diags.into_iter().partition(|d| !d.warning);
     if errors.is_empty() {
