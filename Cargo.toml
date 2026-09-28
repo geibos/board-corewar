@@ -1,6 +1,6 @@
 [package]
 name = "board-corewar"
-version = "2.2.1"
+version = "2.3.0"
 edition = "2021"
 description = "Core War (ICWS'94) engine compatible with pMARS 0.9.2: assembler, simulator, traces and a hill"
 license = "MIT"
