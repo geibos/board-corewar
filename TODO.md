@@ -42,4 +42,10 @@ Ideas, not commitments. None of them is finished.
    newcomer. A challenger reported at place 13 was 10th in `standings` and
    in `cw hill show`. Take the place from `standings` after the push-off.
 
+10. **Versions replace each other.** A hill option (`replace = "name"` or
+    `"name+author"` in `hill.toml`): a challenger that enters removes the
+    member with the same `;name` (and `;author`), as some classic hills do.
+    `;author` is only what the file says, so whoever runs the hill decides
+    whether to trust it.
+
 Start with 1 and 3.
