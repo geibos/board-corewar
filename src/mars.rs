@@ -37,6 +37,58 @@ pub trait Observer {
     fn after_step(&mut self, mars: &Mars, w: usize, written: &[u32], step: u64);
 }
 
+/// Where an instruction puts the cells it writes: nowhere in a plain round,
+/// so that `round` compiles with no trace of the observer.
+trait Notes {
+    fn note(&mut self, at: usize);
+}
+
+impl Notes for () {
+    #[inline]
+    fn note(&mut self, _at: usize) {}
+}
+
+impl Notes for Vec<u32> {
+    #[inline]
+    fn note(&mut self, at: usize) {
+        self.push(at as u32);
+    }
+}
+
+/// How `play_round` executes a step: plainly, or for an `Observer`.
+trait Watch {
+    fn loaded(&mut self, mars: &Mars);
+    fn step(&mut self, mars: &mut Mars, w: usize, done: u64) -> bool;
+}
+
+struct Plain;
+
+impl Watch for Plain {
+    #[inline]
+    fn loaded(&mut self, _mars: &Mars) {}
+    #[inline]
+    fn step(&mut self, mars: &mut Mars, w: usize, _done: u64) -> bool {
+        mars.step(w)
+    }
+}
+
+struct Watched<'a> {
+    observer: &'a mut dyn Observer,
+    written: Vec<u32>,
+}
+
+impl Watch for Watched<'_> {
+    fn loaded(&mut self, mars: &Mars) {
+        self.observer.loaded(mars);
+    }
+    fn step(&mut self, mars: &mut Mars, w: usize, done: u64) -> bool {
+        self.written.clear();
+        let alive = mars.step_noting(w, &mut self.written);
+        self.observer.after_step(mars, w, &self.written, done);
+        alive
+    }
+}
+
 pub struct Mars {
     cs: u32,
     max_processes: usize,
@@ -50,9 +102,6 @@ pub struct Mars {
     pspace_size: u32,
     /// Instructions executed since creation; for benchmarks.
     pub steps: u64,
-    /// Cells written by the instruction being executed, while a round is
-    /// observed; `None` otherwise, and then nothing is kept.
-    record: Option<Vec<u32>>,
     /// Instructions executed in the last round, the one that ended it
     /// included.
     pub last_round_steps: u64,
@@ -70,7 +119,6 @@ impl Mars {
             last_result: vec![cfg.core_size - 1; warriors],
             pspace_size: cfg.pspace_size(),
             steps: 0,
-            record: None,
             last_round_steps: 0,
         }
     }
@@ -128,12 +176,6 @@ impl Mars {
         }
     }
     #[inline]
-    fn note(&mut self, at: usize) {
-        if let Some(r) = &mut self.record {
-            r.push(at as u32);
-        }
-    }
-    #[inline]
     fn inc(&self, x: u32) -> u32 {
         self.add(x, 1)
     }
@@ -169,12 +211,13 @@ impl Mars {
     /// Evaluate one operand: (pointer offset, address of the cell it points
     /// to, snapshot of that cell's A and B numbers at evaluation time).
     #[inline]
-    fn operand(
+    fn operand<N: Notes>(
         &mut self,
         pc: u32,
         ir: &Instruction,
         mode: Mode,
         field: u32,
+        notes: &mut N,
     ) -> (u32, usize, Instruction) {
         if mode == Mode::Immediate {
             return (0, pc as usize, *ir);
@@ -186,11 +229,11 @@ impl Mars {
             match mode {
                 Mode::APredec => {
                     self.core[p].a = self.dec(self.core[p].a);
-                    self.note(p);
+                    notes.note(p);
                 }
                 Mode::BPredec => {
                     self.core[p].b = self.dec(self.core[p].b);
-                    self.note(p);
+                    notes.note(p);
                 }
                 _ => {}
             }
@@ -217,7 +260,7 @@ impl Mars {
             } else {
                 self.core[p].b = self.inc(self.core[p].b);
             }
-            self.note(p);
+            notes.note(p);
         }
         (ptr, at, cell)
     }
@@ -225,14 +268,19 @@ impl Mars {
     /// Execute one instruction of warrior `w`. Returns false if the warrior
     /// has no processes left afterwards.
     pub fn step(&mut self, w: usize) -> bool {
+        self.step_noting(w, &mut ())
+    }
+
+    /// `step`, putting the cells written into `notes`, in order.
+    fn step_noting<N: Notes>(&mut self, w: usize, notes: &mut N) -> bool {
         let pc = match self.queues[w].pop_front() {
             Some(pc) => pc,
             None => return false,
         };
         self.steps += 1;
         let ir = self.core[pc as usize];
-        let (rpa, a_at, air) = self.operand(pc, &ir, ir.a_mode, ir.a);
-        let (wpb, _, mut bir) = self.operand(pc, &ir, ir.b_mode, ir.b);
+        let (rpa, a_at, air) = self.operand(pc, &ir, ir.a_mode, ir.a, notes);
+        let (wpb, _, mut bir) = self.operand(pc, &ir, ir.b_mode, ir.b, notes);
         let t = self.add(pc, wpb) as usize;
         let next = self.inc(pc);
         let jump = self.add(pc, rpa);
@@ -269,7 +317,7 @@ impl Mars {
                         ..src
                     };
                 }
-                self.note(t);
+                notes.note(t);
                 queue(self, next);
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul => {
@@ -296,7 +344,7 @@ impl Mars {
                         c.b = f(bir.b, air.a);
                     }
                 }
-                self.note(t);
+                notes.note(t);
                 queue(self, next);
             }
             Opcode::Div | Opcode::Mod => {
@@ -342,7 +390,7 @@ impl Mars {
                     }
                 };
                 if wrote {
-                    self.note(t);
+                    notes.note(t);
                 }
                 if alive {
                     queue(self, next);
@@ -385,7 +433,7 @@ impl Mars {
                         bir.a != 0 || bir.b != 0
                     }
                 };
-                self.note(t);
+                notes.note(t);
                 queue(self, if nz { jump } else { next });
             }
             Opcode::Spl => {
@@ -414,7 +462,7 @@ impl Mars {
                     Modifier::A | Modifier::BA => self.core[t].a = v,
                     _ => self.core[t].b = v,
                 }
-                self.note(t);
+                notes.note(t);
                 queue(self, next);
             }
             Opcode::Stp => {
@@ -474,7 +522,7 @@ impl Mars {
         positions: [u32; 2],
         first: usize,
     ) -> Outcome {
-        self.play_round(cfg, warriors, positions, first, None)
+        self.play_round(cfg, warriors, positions, first, &mut Plain)
     }
 
     /// `round`, telling `observer` about every instruction and the cells it
@@ -487,24 +535,23 @@ impl Mars {
         first: usize,
         observer: &mut dyn Observer,
     ) -> Outcome {
-        self.record = Some(Vec::new());
-        let o = self.play_round(cfg, warriors, positions, first, Some(observer));
-        self.record = None;
-        o
+        let mut watch = Watched {
+            observer,
+            written: Vec::new(),
+        };
+        self.play_round(cfg, warriors, positions, first, &mut watch)
     }
 
-    fn play_round(
+    fn play_round<W: Watch>(
         &mut self,
         cfg: &Config,
         warriors: [&Warrior; 2],
         positions: [u32; 2],
         first: usize,
-        mut observer: Option<&mut dyn Observer>,
+        watch: &mut W,
     ) -> Outcome {
         self.load(&warriors, &positions);
-        if let Some(o) = observer.as_deref_mut() {
-            o.loaded(self);
-        }
+        watch.loaded(self);
         let mut steps = cfg.max_cycles as u64 * 2;
         let mut w = first;
         let mut done = 0u64;
@@ -512,15 +559,8 @@ impl Mars {
             if steps == 0 {
                 break Outcome::Tie;
             }
-            let alive = self.step(w);
             done += 1;
-            if let Some(o) = observer.as_deref_mut() {
-                let written = self.record.take().unwrap_or_default();
-                o.after_step(self, w, &written, done);
-                let mut buf = written;
-                buf.clear();
-                self.record = Some(buf);
-            }
+            let alive = watch.step(self, w, done);
             if !alive {
                 break Outcome::Win(1 - w);
             }
