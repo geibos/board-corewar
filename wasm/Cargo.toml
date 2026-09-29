@@ -1,6 +1,6 @@
 [package]
 name = "cw-wasm"
-version = "2.3.0"
+version = "2.4.0"
 edition = "2021"
 description = "cw's plain engine and assembler as a WebAssembly module, for replays in a web page"
 license = "MIT"
