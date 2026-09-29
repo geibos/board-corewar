@@ -12,6 +12,7 @@ use corewar::pool;
 use corewar::redcode::{Listing, Warrior};
 use corewar::report::{self, Params as ParamsReport, Stats, WarriorInfo};
 use corewar::trace;
+use sha2::{Digest, Sha256};
 use std::process::exit;
 
 #[derive(Parser)]
@@ -103,6 +104,44 @@ enum Command {
         /// 2 interleaves two matches on one thread (src/multi.rs).
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=2))]
         lanes: u8,
+        #[command(flatten)]
+        params: Params,
+    },
+    /// Each warrior plays each opponent on each seed, all in one run, and
+    /// gets its points (3 a win, 1 a tie; with --hill, the hill's) over the
+    /// seeds. Matches are placed like `cw pair`, the warrior as A. A
+    /// directory stands for its *.red files. A warrior does not play its own
+    /// copy; files that do not assemble are named and left out.
+    Versus {
+        #[arg(required = true)]
+        files: Vec<String>,
+        /// Opponents: files and directories.
+        #[arg(long, num_args = 1.., required_unless_present = "hill")]
+        against: Vec<String>,
+        /// A hill: its members are opponents, best first, and its rules
+        /// give the parameters, the rounds and the points.
+        #[arg(long, conflicts_with_all = ["rounds", "core_size", "cycles", "processes", "length", "distance"])]
+        hill: Option<String>,
+        #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u32).range(1..))]
+        rounds: u32,
+        /// Position seeds, as in `cw pair`: `--seed 1,17,3900`.
+        #[arg(long, value_delimiter = ',', default_values_t = [1], conflicts_with = "seeds")]
+        seed: Vec<u32>,
+        /// N seeds from --salt: seed k (from 0) is the first 8 bytes of
+        /// sha256("cw versus SALT k") as a big-endian number, mod
+        /// CORE + 1 - 2 DISTANCE.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        seeds: Option<u32>,
+        /// For --seeds; default 0.
+        #[arg(long, requires = "seeds")]
+        salt: Option<u64>,
+        /// Threads to play matches on; 0: one per CPU. Same results.
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+        /// Also each warrior's result against each opponent (text; --json
+        /// always has every match).
+        #[arg(long)]
+        per: bool,
         #[command(flatten)]
         params: Params,
     },
@@ -384,7 +423,301 @@ fn main() {
             }
             tournament(&cfg, &files, threads, lanes == 2, json);
         }
+        Command::Versus {
+            files,
+            against,
+            hill,
+            rounds,
+            seed,
+            seeds,
+            salt,
+            jobs,
+            per,
+            params,
+        } => {
+            let (cfg, points, mut opponents) = match hill {
+                Some(dir) => {
+                    let h = or_exit(Hill::open(std::path::Path::new(&dir)));
+                    let files = h
+                        .members()
+                        .into_iter()
+                        .map(|(_, p)| p.to_string_lossy().into_owned())
+                        .collect();
+                    (h.rules.config(), h.rules.points, files)
+                }
+                None => (
+                    params.config(rounds),
+                    hill::Points {
+                        win: 3,
+                        tie: 1,
+                        loss: 0,
+                    },
+                    Vec::new(),
+                ),
+            };
+            opponents.extend(expand(&against));
+            let positions = cfg.core_size + 1 - 2 * cfg.min_distance;
+            let seeds = match seeds {
+                Some(n) => (0..n)
+                    .map(|k| salted(salt.unwrap_or(0), k, positions))
+                    .collect(),
+                None => seed,
+            };
+            let run = Versus {
+                cfg: &cfg,
+                points,
+                seeds: &seeds,
+                threads: threads(jobs),
+            };
+            run.play(&expand(&files), &opponents, per, json);
+        }
         Command::Hill { command } => hill_command(command, json),
+    }
+}
+
+/// The files that FILE and DIR arguments stand for: a directory, its *.red
+/// files sorted by name. Exit 2 on a path that cannot be read.
+fn expand(paths: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in paths {
+        let fail = |e: std::io::Error| -> ! {
+            eprintln!("{}: {}", p, e);
+            exit(2)
+        };
+        let path = std::path::Path::new(p);
+        if !std::fs::metadata(path).unwrap_or_else(|e| fail(e)).is_dir() {
+            out.push(p.clone());
+            continue;
+        }
+        let mut reds: Vec<String> = std::fs::read_dir(path)
+            .and_then(|d| {
+                d.map(|e| e.map(|e| e.path()))
+                    .collect::<std::io::Result<Vec<_>>>()
+            })
+            .unwrap_or_else(|e| fail(e))
+            .into_iter()
+            .filter(|f| f.is_file() && f.extension().is_some_and(|x| x == "red"))
+            .map(|f| f.to_string_lossy().into_owned())
+            .collect();
+        reds.sort();
+        out.extend(reds);
+    }
+    out
+}
+
+/// Seed `k` of `--seeds N --salt SALT`: the first 8 bytes of
+/// sha256("cw versus SALT k"), big-endian, mod `positions`.
+fn salted(salt: u64, k: u32, positions: u32) -> u32 {
+    let d = Sha256::digest(format!("cw versus {} {}", salt, k).as_bytes());
+    let n = u64::from_be_bytes(d[..8].try_into().expect("8 bytes"));
+    (n % positions as u64) as u32
+}
+
+/// The warriors of one side of `cw versus` that assembled.
+struct Side {
+    info: Vec<WarriorInfo>,
+    /// As on a hill: the start of the source's SHA-256.
+    ids: Vec<String>,
+    code: Vec<Compiled>,
+}
+
+impl Side {
+    fn load(files: &[String], cfg: &Config, rejected: &mut Vec<report::Rejected>) -> Side {
+        let mut side = Side {
+            info: Vec::new(),
+            ids: Vec::new(),
+            code: Vec::new(),
+        };
+        for f in files {
+            let r = corewar::asm::read_source(f.as_ref())
+                .map_err(|e| e.to_string())
+                .and_then(|src| {
+                    let w = assemble(&src, cfg).map_err(|e| e.to_string())?;
+                    Ok((src, w))
+                });
+            match r {
+                Ok((src, w)) => {
+                    side.info.push(WarriorInfo::new(f, &w));
+                    side.ids.push(hill::warrior_id(&src));
+                    side.code.push(Compiled::new(&w));
+                }
+                Err(error) => rejected.push(report::Rejected {
+                    file: f.clone(),
+                    error,
+                }),
+            }
+        }
+        side
+    }
+}
+
+/// Rounds won, tied and lost.
+#[derive(Clone, Copy, Default)]
+struct Record {
+    wins: u64,
+    ties: u64,
+    losses: u64,
+}
+
+impl Record {
+    fn add(&mut self, s: &Score) {
+        self.wins += s.w1 as u64;
+        self.ties += s.ties as u64;
+        self.losses += s.w2 as u64;
+    }
+
+    fn points(&self, p: &hill::Points) -> i64 {
+        self.wins as i64 * p.win + self.ties as i64 * p.tie + self.losses as i64 * p.loss
+    }
+}
+
+struct Versus<'a> {
+    cfg: &'a Config,
+    points: hill::Points,
+    seeds: &'a [u32],
+    threads: usize,
+}
+
+impl Versus<'_> {
+    fn play(&self, files: &[String], opponents: &[String], per: bool, json: bool) {
+        let cfg = self.cfg;
+        let mut rejected = Vec::new();
+        let ws = Side::load(files, cfg, &mut rejected);
+        let os = Side::load(opponents, &second(cfg), &mut rejected);
+        for r in &rejected {
+            eprintln!("{}: {} (not played)", r.file, r.error);
+        }
+        if ws.code.is_empty() {
+            eprintln!("error: no warrior assembled");
+            exit(2);
+        }
+        if os.code.is_empty() {
+            eprintln!("error: no opponent assembled");
+            exit(2);
+        }
+        let mut jobs = Vec::new();
+        let mut keys = Vec::new();
+        let mut copies = Vec::new();
+        for i in 0..ws.code.len() {
+            for j in 0..os.code.len() {
+                if ws.ids[i] == os.ids[j] {
+                    eprintln!(
+                        "{} and {}: the same warrior, not played",
+                        ws.info[i].file, os.info[j].file
+                    );
+                    copies.push([i, j]);
+                    continue;
+                }
+                for &seed in self.seeds {
+                    jobs.push(Job {
+                        a: &ws.code[i],
+                        b: &os.code[j],
+                        seed: seed as i32,
+                    });
+                    keys.push((i, j, seed));
+                }
+            }
+        }
+        let t0 = std::time::Instant::now();
+        let (results, steps) = pool::play_all(cfg, &jobs, cfg.rounds, self.threads);
+        let dt = t0.elapsed().as_secs_f64();
+        let mut table = vec![vec![None::<Record>; os.code.len()]; ws.code.len()];
+        for (&(i, j, _), s) in keys.iter().zip(&results) {
+            table[i][j].get_or_insert_with(Record::default).add(s);
+        }
+        let n = self.seeds.len() as f64;
+        let totals: Vec<Record> = table
+            .iter()
+            .map(|row| {
+                row.iter().flatten().fold(Record::default(), |mut t, r| {
+                    t.wins += r.wins;
+                    t.ties += r.ties;
+                    t.losses += r.losses;
+                    t
+                })
+            })
+            .collect();
+        // Stable: equal scores keep the order of the command line.
+        let mut order: Vec<usize> = (0..ws.code.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(totals[i].points(&self.points)));
+        let standings: Vec<report::VersusStanding> = order
+            .iter()
+            .enumerate()
+            .map(|(place, &i)| report::VersusStanding {
+                place: place + 1,
+                warrior: i,
+                score: totals[i].points(&self.points) as f64 / n,
+                opponents: table[i].iter().flatten().count(),
+                wins: totals[i].wins,
+                ties: totals[i].ties,
+                losses: totals[i].losses,
+            })
+            .collect();
+        if json {
+            print_json(&report::Versus {
+                params: ParamsReport::from(cfg),
+                points: self.points,
+                warriors: ws.info,
+                opponents: os.info,
+                seeds: self.seeds.to_vec(),
+                matches: keys
+                    .iter()
+                    .zip(&results)
+                    .map(|(&(a, b, seed), &result)| report::Match { a, b, seed, result })
+                    .collect(),
+                standings,
+                copies,
+                rejected,
+                stats: Stats {
+                    instructions: steps,
+                    seconds: dt,
+                },
+            });
+            return;
+        }
+        println!(
+            "{:>3} {:>10} {:>4} {:>7} {:>7} {:>7}  name (file)",
+            "#", "score", "opp", "W", "T", "L"
+        );
+        for s in &standings {
+            let w = &ws.info[s.warrior];
+            println!(
+                "{:3} {:10.1} {:4} {:7} {:7} {:7}  {} ({})",
+                s.place, s.score, s.opponents, s.wins, s.ties, s.losses, w.name, w.file
+            );
+        }
+        if per {
+            for s in &standings {
+                let w = &ws.info[s.warrior];
+                println!();
+                println!("{} ({}):", w.name, w.file);
+                println!(
+                    "   {:>10} {:>7} {:>7} {:>7}  opponent (file)",
+                    "score", "W", "T", "L"
+                );
+                for (j, r) in table[s.warrior].iter().enumerate() {
+                    let Some(r) = r else { continue };
+                    let o = &os.info[j];
+                    println!(
+                        "   {:10.1} {:7} {:7} {:7}  {} ({})",
+                        r.points(&self.points) as f64 / n,
+                        r.wins,
+                        r.ties,
+                        r.losses,
+                        o.name,
+                        o.file
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "{} matches x {} rounds, {} instructions, {:.3} s, {:.1} M instructions/s",
+            jobs.len(),
+            cfg.rounds,
+            steps,
+            dt,
+            steps as f64 / dt / 1e6
+        );
     }
 }
 

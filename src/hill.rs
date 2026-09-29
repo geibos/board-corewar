@@ -385,6 +385,15 @@ impl Hill {
         self.dir.join("warriors").join(format!("{}.red", id))
     }
 
+    /// The members, best first, each with its source file.
+    pub fn members(&self) -> Vec<(Member, PathBuf)> {
+        self.state
+            .members
+            .iter()
+            .map(|m| (m.clone(), self.source_path(&m.id)))
+            .collect()
+    }
+
     /// Play `files` against the hill, one challenger after another in the
     /// order given, on `threads` threads; with no files, replay what a
     /// change of rules made missing and rank again. Saves the hill.

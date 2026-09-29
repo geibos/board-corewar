@@ -109,6 +109,10 @@ cw pair A B [--rounds N] [--seed S]
 cw tournament FILE... [--rounds N] [--jobs N] [--lanes 1|2]
                                   a round robin, pair k placed like -F D+997k mod (S+1-2D);
                                   --jobs N: matches on N threads (0: one per CPU)
+cw versus FILE|DIR... [--against FILE|DIR...] [--hill DIR]
+          [--seed S,... | --seeds N [--salt X]] [--rounds N] [--jobs N] [--per]
+                                  each warrior against each opponent on each seed,
+                                  placed like cw pair; points over the seeds, best first
 cw battle A B --pos N [--first 0|1]
                                   one battle, like `pmars -b -r 1 -F N A B`
 cw trace A B [--rounds N] [--seed S] [--record R,...] [--every N]
@@ -155,6 +159,32 @@ against a hill's stored matches. Warrior 0 is A. A cycle is one instruction
 of each warrior; a tie ends on the last cycle. To trace a hill match, put the
 warrior with the smaller id first and pass `--seed` = the first 8 bytes of
 sha256("A_ID:B_ID") as a big-endian number, mod core + 1 − 2 × distance.
+
+`cw versus` tries warriors out: every warrior plays every opponent on every
+seed, in one process on every CPU (`--jobs 0`, the default), the warrior as
+A. A directory stands for its `*.red` files. With `--hill DIR` the opponents
+are the hill's members, best first, and the hill's rules give the
+parameters, the rounds and the points; the match flags are then refused,
+and `--against` adds opponents to the members.
+`--seeds N --salt X` makes N seeds that are the same on every machine: seed
+k (from 0) is the first 8 bytes of sha256("cw versus X k") as a big-endian
+number, mod core + 1 − 2 × distance. The table gives each warrior its points
+from all its matches divided by the number of seeds, the opponents it met
+and the rounds won, tied and lost; `--per` adds a row per opponent, `--json`
+has every match. A warrior does not play its own copy (the same source), and
+a file that does not assemble is named on stderr and left out; the exit code
+is 2 only when nothing is left to play. Each match is the `cw pair` with the
+same seed (`tests/versus.rs`). 30 warriors against a hill of 20 on 4 seeds,
+2400 matches of 250 rounds, take about 30 s on 10 cores.
+
+```
+$ cw versus contenders/ --hill hill --seeds 32 --salt 7
+contenders/hameleon.red and hill/warriors/ff68d7a409c90ae7.red: the same warrior, not played
+  #      score  opp       W       T       L  name (file)
+  1    11679.2   20  120694   11651   27655  Светофор (contenders/svetofor.red)
+  2    10355.9   19  108114    7048   36838  Хамелеон (contenders/hameleon.red)
+1248 matches x 250 rounds, 12619568751 instructions, 12.245 s, 1030.6 M instructions/s
+```
 
 ## Hill
 

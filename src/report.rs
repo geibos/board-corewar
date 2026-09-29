@@ -154,3 +154,42 @@ pub struct Traced {
     pub rounds: Vec<crate::trace::RoundSummary>,
     pub recorded: Vec<crate::trace::Recording>,
 }
+
+/// `cw versus`: each warrior against each opponent on each seed. In a
+/// match `a` indexes `warriors` (pMARS's first warrior), `b` `opponents`.
+#[derive(Serialize)]
+pub struct Versus {
+    pub params: Params,
+    /// Per round won, tied and lost: the hill's with --hill.
+    pub points: crate::hill::Points,
+    pub warriors: Vec<WarriorInfo>,
+    pub opponents: Vec<WarriorInfo>,
+    pub seeds: Vec<u32>,
+    pub matches: Vec<Match>,
+    pub standings: Vec<VersusStanding>,
+    /// (warrior, opponent) pairs with the same source: not played.
+    pub copies: Vec<[usize; 2]>,
+    /// Files that did not assemble: left out.
+    pub rejected: Vec<Rejected>,
+    pub stats: Stats,
+}
+
+#[derive(Serialize)]
+pub struct VersusStanding {
+    pub place: usize,
+    pub warrior: usize,
+    /// The points of all its matches over the number of seeds.
+    pub score: f64,
+    /// Opponents it played.
+    pub opponents: usize,
+    /// Rounds, over all its matches.
+    pub wins: u64,
+    pub ties: u64,
+    pub losses: u64,
+}
+
+#[derive(Serialize)]
+pub struct Rejected {
+    pub file: String,
+    pub error: String,
+}
