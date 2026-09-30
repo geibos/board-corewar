@@ -1,12 +1,26 @@
-[package]
-name = "board-corewar"
+# The engine and its WebAssembly build (wasm/) share one version, raised
+# here. Commands run here build and test the engine alone; the module is
+# built from wasm/ (./build.sh).
+[workspace]
+members = [".", "wasm"]
+default-members = ["."]
+
+[workspace.package]
 version = "2.5.0"
 edition = "2021"
-description = "Core War (ICWS'94) engine compatible with pMARS 0.9.2: assembler, simulator, traces and a hill"
 license = "MIT"
 repository = "https://github.com/geibos/board-corewar"
-publish = false
 rust-version = "1.89"
+
+[package]
+name = "board-corewar"
+version.workspace = true
+edition.workspace = true
+description = "Core War (ICWS'94) engine compatible with pMARS 0.9.2: assembler, simulator, traces and a hill"
+license.workspace = true
+repository.workspace = true
+publish = false
+rust-version.workspace = true
 
 [lib]
 name = "corewar"

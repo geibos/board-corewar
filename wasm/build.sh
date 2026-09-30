@@ -4,5 +4,5 @@
 set -eu
 cd "$(dirname "$0")"
 cargo build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/cw_wasm.wasm cw.wasm
+cp ../target/wasm32-unknown-unknown/release/cw_wasm.wasm cw.wasm
 ls -l cw.wasm

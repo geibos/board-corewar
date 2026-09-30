@@ -65,10 +65,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: the tag matches wasm/Cargo.toml
+      - name: the tag matches the workspace version (wasm/ inherits it)
         run: |
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' wasm/Cargo.toml | head -1)
-          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, wasm/Cargo.toml $v"; exit 1; }
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $v"; exit 1; }
+          grep -qx 'version.workspace = true' wasm/Cargo.toml
       - run: cd wasm && cargo test --release
       - run: cd wasm && ./build.sh && cp cw.wasm "../cw-$GITHUB_REF_NAME-wasm32.wasm"
       - uses: actions/attest-build-provenance@v2

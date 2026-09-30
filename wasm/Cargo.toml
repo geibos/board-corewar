@@ -1,17 +1,17 @@
 [package]
 name = "cw-wasm"
-version = "2.5.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "cw's plain engine and assembler as a WebAssembly module, for replays in a web page"
-license = "MIT"
-repository = "https://github.com/geibos/board-corewar"
+license.workspace = true
+repository.workspace = true
 publish = false
-rust-version = "1.89"
+rust-version.workspace = true
 
-# Not a member of the engine's workspace: the engine builds and tests without
-# it. Build with ./build.sh (wasm32-unknown-unknown); `cargo test` here runs
-# the same code natively.
-[workspace]
+# A member of the engine's workspace, not a default one: commands at the
+# root build and test the engine alone. Build with ./build.sh
+# (wasm32-unknown-unknown); `cargo test` here runs the same code natively.
+# The release profile is the workspace's (the root Cargo.toml).
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -21,9 +21,3 @@ path = "src/lib.rs"
 board-corewar = { path = ".." }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-
-[profile.release]
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-opt-level = 3
