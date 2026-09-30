@@ -6,7 +6,7 @@ members = [".", "wasm"]
 default-members = ["."]
 
 [workspace.package]
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/geibos/board-corewar"

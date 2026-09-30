@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "board-corewar"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "clap",
  "criterion",
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "cw-wasm"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "board-corewar",
  "serde",
