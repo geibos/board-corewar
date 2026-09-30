@@ -195,8 +195,7 @@ and two runs at once wait for each other (a lock on `DIR/.lock`).
 cw hill init HILL --size 20 --rounds 250      # pMARS flags too: -s -c -p -l -d
 cw hill challenge HILL a.red b.red --jobs 0   # each file in turn plays every member
 cw hill show HILL                              # the table
-cw hill verify HILL --jobs 0                   # check it; --json on all
-cw hill recount HILL --seed TEXT --runs 32     # a final table on fresh placements
+cw hill verify HILL --jobs 0                   # check it; --json on all four
 ```
 
 Whoever submits a warrior can run the challenge; `verify` is how everyone
@@ -254,15 +253,6 @@ Every match is reproducible with pMARS: of two warriors, the one whose id
 `-F` = seed + distance, the seed derived from both ids (or, with random
 placement, kept in results.json) and shown in `--json` output. `hill_matches_like_pmars` in `tests/pmars_diff.rs` replays
 a hill's matches with pMARS.
-
-`recount` replays the members on placements from a text and makes a table
-from those matches alone, changing nothing: each pair plays `--runs`
-matches, run k (from 0) of a pair A:B (A the smaller id, moving first)
-placed by the first 8 bytes of sha256("TEXT:A:B:K") as a big-endian number,
-mod core + 1 − 2 × distance. Points and the tie rule are the hill's. It is
-for a season's final table: with a text taken from a value published only
-after the freeze, nobody could fit a warrior to those placements, and
-anyone with the frozen hill can recount it.
 
 `seeds/` holds ten weak warriors to start a hill with.
 

@@ -189,23 +189,6 @@ enum HillCommand {
     },
     /// The table, best first.
     Show { dir: String },
-    /// Replay the members on fresh placements, without changing the hill:
-    /// run k of a pair A:B (A the smaller id, moving first) is placed by the
-    /// first 8 bytes of sha256("SEED:A:B:K"), big-endian, mod CORE + 1 -
-    /// 2 DISTANCE. The table comes from these matches alone. For a final
-    /// table after a freeze, from a value published after it.
-    Recount {
-        dir: String,
-        /// The text the placements come from.
-        #[arg(long)]
-        seed: String,
-        /// Matches per pair.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-        runs: u32,
-        /// Threads to play matches on; 0: one per CPU. Same results.
-        #[arg(long, default_value_t = 1)]
-        jobs: usize,
-    },
     /// Check the hill without changing it: sources against their ids, every
     /// stored match played again, the table against the rules. Exit code 1
     /// when anything differs.
@@ -842,27 +825,6 @@ fn hill_command(command: HillCommand, json: bool) {
                 );
             }
             exit(!r.ok as i32);
-        }
-        HillCommand::Recount {
-            dir,
-            seed,
-            runs,
-            jobs,
-        } => {
-            let h = or_exit(Hill::open(std::path::Path::new(&dir)));
-            let r = or_exit(h.recount(&seed, runs, threads(jobs)));
-            if json {
-                print_json(&r);
-                return;
-            }
-            println!("recount: {} matches a pair, placed from {}", r.runs, r.seed);
-            print_standings(&r.standings);
-            eprintln!(
-                "{} matches played, {} instructions, {:.3} s",
-                r.matches.len(),
-                r.stats.instructions,
-                r.stats.seconds
-            );
         }
         HillCommand::Show { dir } => {
             let h = or_exit(Hill::open(std::path::Path::new(&dir)));

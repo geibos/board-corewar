@@ -206,15 +206,6 @@ pub fn drawn_seed(draw: u64, a: &str, b: &str, positions: u32) -> u32 {
     (u64::from_be_bytes(n) % positions as u64) as u32
 }
 
-/// The position seed of run `k` (from 0) of a pair in a recount: the first
-/// 8 bytes of sha256("TEXT:A:B:K"), big-endian, mod `positions`.
-pub fn recount_seed(text: &str, a: &str, b: &str, k: u32, positions: u32) -> u32 {
-    let d = Sha256::digest(format!("{}:{}:{}:{}", text, a, b, k).as_bytes());
-    let mut n = [0u8; 8];
-    n.copy_from_slice(&d[..8]);
-    (u64::from_be_bytes(n) % positions as u64) as u32
-}
-
 /// A number nobody knows before the challenge: 8 bytes of the kernel's
 /// random source.
 fn draw_from_os() -> Result<u64> {
@@ -325,30 +316,6 @@ pub struct ChallengeReport {
     pub pushed_off: Vec<Gone>,
     /// Matches played this time; the rest came from results.json.
     pub played: Vec<Played>,
-    pub standings: Vec<Standing>,
-    pub stats: Stats,
-}
-
-/// One match of a recount: `a`, the smaller id, moved first.
-#[derive(Serialize)]
-pub struct Recounted {
-    pub a: String,
-    pub b: String,
-    /// From 0.
-    pub run: u32,
-    pub seed: u32,
-    pub result: Score,
-}
-
-#[derive(Serialize)]
-pub struct RecountReport {
-    pub rules: Rules,
-    /// The text the placements come from.
-    pub seed: String,
-    /// Matches per pair.
-    pub runs: u32,
-    pub matches: Vec<Recounted>,
-    /// From these matches alone; `age` as recorded.
     pub standings: Vec<Standing>,
     pub stats: Stats,
 }
@@ -701,127 +668,6 @@ impl Hill {
             pushed_off,
             played,
             standings: self.standings()?,
-            stats: Stats {
-                instructions,
-                seconds: t0.elapsed().as_secs_f64(),
-            },
-        })
-    }
-
-    /// The members replayed on placements nobody knew: each pair plays `runs`
-    /// matches, run k placed by `recount_seed(text, a, b, k)`, and the table
-    /// comes from those matches alone (points and tie rule as on the hill).
-    /// For a final table after a freeze, `text` from a value published after
-    /// it. Changes nothing.
-    pub fn recount(&self, text: &str, runs: u32, threads: usize) -> Result<RecountReport> {
-        let t0 = std::time::Instant::now();
-        if text.is_empty() {
-            return Err("the seed text is empty".into());
-        }
-        if runs == 0 {
-            return Err("--runs: at least 1".into());
-        }
-        let cfg = self.rules.config();
-        let second = Config {
-            first_warrior: false,
-            ..cfg
-        };
-        let ms = &self.state.members;
-        let mut compiled: HashMap<&str, (Compiled, Compiled)> = HashMap::new();
-        for m in ms {
-            let path = self.source_path(&m.id);
-            let src = read_source(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-            if warrior_id(&src) != m.id {
-                return Err(format!(
-                    "{}: the text does not hash to its id",
-                    path.display()
-                ));
-            }
-            let w1 = assemble(&src, &cfg).map_err(|e| format!("{}: {}", m.id, e))?;
-            let w2 = assemble(&src, &second).map_err(|e| format!("{}: {}", m.id, e))?;
-            compiled.insert(&m.id, (Compiled::new(&w1), Compiled::new(&w2)));
-        }
-        let positions = cfg.core_size + 1 - 2 * cfg.min_distance;
-        let mut planned = Vec::new();
-        for (i, x) in ms.iter().enumerate() {
-            for y in &ms[i + 1..] {
-                let (a, b, _) = pairing(&x.id, &y.id);
-                for k in 0..runs {
-                    planned.push((a, b, k, recount_seed(text, a, b, k, positions)));
-                }
-            }
-        }
-        let jobs: Vec<Job> = planned
-            .iter()
-            .map(|(a, b, _, s)| Job {
-                a: &compiled[a].0,
-                b: &compiled[b].1,
-                seed: *s as i32,
-            })
-            .collect();
-        let (scores, instructions) = pool::play_all(&cfg, &jobs, cfg.rounds, threads);
-        let p = self.rules.points;
-        let mut rows: Vec<(Standing, u64)> = ms
-            .iter()
-            .map(|m| {
-                (
-                    Standing {
-                        place: 0,
-                        id: m.id.clone(),
-                        name: m.name.clone(),
-                        author: m.author.clone(),
-                        score: 0,
-                        wins: 0,
-                        ties: 0,
-                        losses: 0,
-                        age: m.age,
-                    },
-                    m.arrived,
-                )
-            })
-            .collect();
-        let index: HashMap<&str, usize> = ms
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (m.id.as_str(), i))
-            .collect();
-        let mut matches = Vec::with_capacity(planned.len());
-        for ((a, b, k, s), r) in planned.into_iter().zip(scores) {
-            for (who, won, lost) in [(a, r.w1, r.w2), (b, r.w2, r.w1)] {
-                let row = &mut rows[index[who]].0;
-                row.wins += won;
-                row.losses += lost;
-                row.ties += r.ties;
-                row.score += p.win * won as i64 + p.tie * r.ties as i64 + p.loss * lost as i64;
-            }
-            matches.push(Recounted {
-                a: a.to_owned(),
-                b: b.to_owned(),
-                run: k,
-                seed: s,
-                result: r,
-            });
-        }
-        let older = self.rules.tie_break == TieBreak::Older;
-        rows.sort_by(|(x, ax), (y, ay)| {
-            y.score
-                .cmp(&x.score)
-                .then(if older { ax.cmp(ay) } else { ay.cmp(ax) })
-        });
-        let standings = rows
-            .into_iter()
-            .enumerate()
-            .map(|(i, (mut r, _))| {
-                r.place = i + 1;
-                r
-            })
-            .collect();
-        Ok(RecountReport {
-            rules: self.rules.clone(),
-            seed: text.to_owned(),
-            runs,
-            matches,
-            standings,
             stats: Stats {
                 instructions,
                 seconds: t0.elapsed().as_secs_f64(),
