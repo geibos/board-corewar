@@ -165,6 +165,10 @@ enum HillCommand {
         size: usize,
         #[arg(long, default_value_t = 250, value_parser = clap::value_parser!(u32).range(1..))]
         rounds: u32,
+        /// Where a match places the second warrior: "hash", from the two
+        /// warriors' ids, or "random", from a number drawn at each challenge.
+        #[arg(long, default_value = "hash", value_parser = ["hash", "random"])]
+        placement: String,
         #[command(flatten)]
         params: Params,
     },
@@ -178,9 +182,30 @@ enum HillCommand {
         /// Threads to play matches on; 0: one per CPU. Same results.
         #[arg(long, default_value_t = 1)]
         jobs: usize,
+        /// On a hill with placement = "random": play from this number
+        /// instead of drawing one (to replay a challenge from its output).
+        #[arg(long)]
+        seed: Option<u64>,
     },
     /// The table, best first.
     Show { dir: String },
+    /// Replay the members on fresh placements, without changing the hill:
+    /// run k of a pair A:B (A the smaller id, moving first) is placed by the
+    /// first 8 bytes of sha256("SEED:A:B:K"), big-endian, mod CORE + 1 -
+    /// 2 DISTANCE. The table comes from these matches alone. For a final
+    /// table after a freeze, from a value published after it.
+    Recount {
+        dir: String,
+        /// The text the placements come from.
+        #[arg(long)]
+        seed: String,
+        /// Matches per pair.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        runs: u32,
+        /// Threads to play matches on; 0: one per CPU. Same results.
+        #[arg(long, default_value_t = 1)]
+        jobs: usize,
+    },
     /// Check the hill without changing it: sources against their ids, every
     /// stored match played again, the table against the rules. Exit code 1
     /// when anything differs.
@@ -741,9 +766,13 @@ fn hill_command(command: HillCommand, json: bool) {
             dir,
             size,
             rounds,
+            placement,
             params,
         } => {
-            let rules = hill::Rules::new(&params.config(rounds), size);
+            let mut rules = hill::Rules::new(&params.config(rounds), size);
+            if placement == "random" {
+                rules.placement = hill::Placement::Random;
+            }
             or_exit(Hill::init(std::path::Path::new(&dir), &rules));
             if !json {
                 println!(
@@ -752,12 +781,20 @@ fn hill_command(command: HillCommand, json: bool) {
                 );
             }
         }
-        HillCommand::Challenge { dir, files, jobs } => {
+        HillCommand::Challenge {
+            dir,
+            files,
+            jobs,
+            seed,
+        } => {
             let mut h = or_exit(Hill::open(std::path::Path::new(&dir)));
-            let r = or_exit(h.challenge(&files, threads(jobs)));
+            let r = or_exit(h.challenge_seeded(&files, threads(jobs), seed));
             if json {
                 print_json(&r);
                 return;
+            }
+            if let Some(s) = r.seed {
+                println!("placement drawn from {}", s);
             }
             for c in &r.challengers {
                 let what = match c.status {
@@ -805,6 +842,27 @@ fn hill_command(command: HillCommand, json: bool) {
                 );
             }
             exit(!r.ok as i32);
+        }
+        HillCommand::Recount {
+            dir,
+            seed,
+            runs,
+            jobs,
+        } => {
+            let h = or_exit(Hill::open(std::path::Path::new(&dir)));
+            let r = or_exit(h.recount(&seed, runs, threads(jobs)));
+            if json {
+                print_json(&r);
+                return;
+            }
+            println!("recount: {} matches a pair, placed from {}", r.runs, r.seed);
+            print_standings(&r.standings);
+            eprintln!(
+                "{} matches played, {} instructions, {:.3} s",
+                r.matches.len(),
+                r.stats.instructions,
+                r.stats.seconds
+            );
         }
         HillCommand::Show { dir } => {
             let h = or_exit(Hill::open(std::path::Path::new(&dir)));

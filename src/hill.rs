@@ -16,6 +16,13 @@
 //! derived from both ids. So a result is the same whenever and in whatever
 //! order warriors arrive, and it is cached until the rules that decide it
 //! (parameters and rounds) change. Points, size and the tie rule only rank.
+//!
+//! With `placement = "random"` in hill.toml the position seed of a match
+//! comes instead from a number drawn at the challenge (`/dev/urandom`, or
+//! `--seed` to replay one) and both ids; the number is in the report and in
+//! history.jsonl, and every match's seed is kept in results.json, so that
+//! `verify` and anyone holding the output replay the same matches. Nobody
+//! can know a match's placement before the challenge that plays it.
 use crate::asm::{assemble, read_source, Config};
 use crate::fast::Compiled;
 use crate::mars::Score;
@@ -39,6 +46,23 @@ pub enum TieBreak {
     Newer,
 }
 
+/// Where a match places the second warrior.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    /// From the two warriors' ids (`seed`): known before the match.
+    #[default]
+    Hash,
+    /// From a number drawn at the challenge and the two ids (`drawn_seed`).
+    Random,
+}
+
+impl Placement {
+    fn is_hash(&self) -> bool {
+        *self == Placement::Hash
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Rules {
@@ -47,6 +71,10 @@ pub struct Rules {
     /// Rounds per match.
     pub rounds: u32,
     pub tie_break: TieBreak,
+    /// Left out of hill.toml when "hash", so that hills made before it was
+    /// an option read and write the same bytes.
+    #[serde(default, skip_serializing_if = "Placement::is_hash")]
+    pub placement: Placement,
     pub params: MatchParams,
     pub points: Points,
 }
@@ -91,6 +119,7 @@ impl Rules {
             size,
             rounds: cfg.rounds,
             tie_break: TieBreak::Older,
+            placement: Placement::Hash,
             params: MatchParams {
                 core_size: cfg.core_size,
                 cycles: cfg.max_cycles,
@@ -126,16 +155,17 @@ impl Rules {
         self.config().check(2)
     }
 
-    /// What decides a match: the parameters and the rounds.
+    /// What decides a match: the parameters, the rounds and the placement.
     fn fingerprint(&self) -> String {
         let p = &self.params;
-        hash(
-            format!(
-                "cw-hill 1 s{} c{} p{} l{} d{} r{}",
-                p.core_size, p.cycles, p.processes, p.length, p.distance, self.rounds
-            )
-            .as_bytes(),
-        )
+        let mut text = format!(
+            "cw-hill 1 s{} c{} p{} l{} d{} r{}",
+            p.core_size, p.cycles, p.processes, p.length, p.distance, self.rounds
+        );
+        if self.placement == Placement::Random {
+            text += " placement random";
+        }
+        hash(text.as_bytes())
     }
 }
 
@@ -167,6 +197,35 @@ pub fn seed(a: &str, b: &str, positions: u32) -> u32 {
     (u64::from_be_bytes(n) % positions as u64) as u32
 }
 
+/// The position seed of a match on a hill with `placement = "random"`:
+/// the first 8 bytes of sha256("DRAW:A:B"), big-endian, mod `positions`.
+pub fn drawn_seed(draw: u64, a: &str, b: &str, positions: u32) -> u32 {
+    let d = Sha256::digest(format!("{}:{}:{}", draw, a, b).as_bytes());
+    let mut n = [0u8; 8];
+    n.copy_from_slice(&d[..8]);
+    (u64::from_be_bytes(n) % positions as u64) as u32
+}
+
+/// The position seed of run `k` (from 0) of a pair in a recount: the first
+/// 8 bytes of sha256("TEXT:A:B:K"), big-endian, mod `positions`.
+pub fn recount_seed(text: &str, a: &str, b: &str, k: u32, positions: u32) -> u32 {
+    let d = Sha256::digest(format!("{}:{}:{}:{}", text, a, b, k).as_bytes());
+    let mut n = [0u8; 8];
+    n.copy_from_slice(&d[..8]);
+    (u64::from_be_bytes(n) % positions as u64) as u32
+}
+
+/// A number nobody knows before the challenge: 8 bytes of the kernel's
+/// random source.
+fn draw_from_os() -> Result<u64> {
+    use std::io::Read;
+    let mut b = [0u8; 8];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .map_err(|e| format!("/dev/urandom: {}", e))?;
+    Ok(u64::from_be_bytes(b))
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Member {
     pub id: String,
@@ -193,6 +252,9 @@ struct Cache {
     fingerprint: String,
     /// "a:b" (a moved first) to the score from a's side.
     matches: BTreeMap<String, Score>,
+    /// "a:b" to the match's position seed, on a hill with random placement.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    seeds: BTreeMap<String, u32>,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,10 +318,37 @@ pub struct Standing {
 #[derive(Serialize)]
 pub struct ChallengeReport {
     pub rules: Rules,
+    /// The number drawn for this challenge, on a hill with random placement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
     pub challengers: Vec<Challenger>,
     pub pushed_off: Vec<Gone>,
     /// Matches played this time; the rest came from results.json.
     pub played: Vec<Played>,
+    pub standings: Vec<Standing>,
+    pub stats: Stats,
+}
+
+/// One match of a recount: `a`, the smaller id, moved first.
+#[derive(Serialize)]
+pub struct Recounted {
+    pub a: String,
+    pub b: String,
+    /// From 0.
+    pub run: u32,
+    pub seed: u32,
+    pub result: Score,
+}
+
+#[derive(Serialize)]
+pub struct RecountReport {
+    pub rules: Rules,
+    /// The text the placements come from.
+    pub seed: String,
+    /// Matches per pair.
+    pub runs: u32,
+    pub matches: Vec<Recounted>,
+    /// From these matches alone; `age` as recorded.
     pub standings: Vec<Standing>,
     pub stats: Stats,
 }
@@ -334,6 +423,7 @@ impl Hill {
             &to_json(&Cache {
                 fingerprint: rules.fingerprint(),
                 matches: BTreeMap::new(),
+                seeds: BTreeMap::new(),
             }),
         )?;
         // Last: its presence is what makes DIR a hill.
@@ -369,6 +459,7 @@ impl Hill {
             cache = Cache {
                 fingerprint: rules.fingerprint(),
                 matches: BTreeMap::new(),
+                seeds: BTreeMap::new(),
             };
         }
         Ok(Hill {
@@ -398,7 +489,31 @@ impl Hill {
     /// order given, on `threads` threads; with no files, replay what a
     /// change of rules made missing and rank again. Saves the hill.
     pub fn challenge(&mut self, files: &[String], threads: usize) -> Result<ChallengeReport> {
+        self.challenge_seeded(files, threads, None)
+    }
+
+    /// `challenge` with the number a hill with random placement plays from:
+    /// given (to replay a challenge from its output), or drawn when `None`.
+    /// A hill with hash placement refuses one.
+    pub fn challenge_seeded(
+        &mut self,
+        files: &[String],
+        threads: usize,
+        given: Option<u64>,
+    ) -> Result<ChallengeReport> {
         let t0 = std::time::Instant::now();
+        let draw = match (self.rules.placement, given) {
+            (Placement::Hash, None) => None,
+            (Placement::Hash, Some(_)) => {
+                return Err(
+                    "this hill places matches from the warriors' ids (placement = \"hash\"); \
+                     a seed is for placement = \"random\""
+                        .into(),
+                )
+            }
+            (Placement::Random, Some(s)) => Some(s),
+            (Placement::Random, None) => Some(draw_from_os()?),
+        };
         let cfg = self.rules.config();
         let second = Config {
             first_warrior: false,
@@ -511,7 +626,11 @@ impl Hill {
             for y in &ids[i + 1..] {
                 let (a, b, key) = pairing(x, y);
                 if !self.cache.matches.contains_key(&key) {
-                    missing.push((a, b, key, seed(a, b, positions)));
+                    let s = match draw {
+                        Some(d) => drawn_seed(d, a, b, positions),
+                        None => seed(a, b, positions),
+                    };
+                    missing.push((a, b, key, s));
                 }
             }
         }
@@ -526,6 +645,9 @@ impl Hill {
         let (scores, instructions) = pool::play_all(&cfg, &jobs, cfg.rounds, threads);
         let mut played = Vec::new();
         for ((a, b, key, s), result) in missing.into_iter().zip(scores) {
+            if draw.is_some() {
+                self.cache.seeds.insert(key.clone(), s);
+            }
             self.cache.matches.insert(key, result);
             played.push(Played {
                 a: a.to_owned(),
@@ -569,13 +691,137 @@ impl Hill {
             k.split_once(':')
                 .is_some_and(|(a, b)| members.contains(a) && members.contains(b))
         });
-        self.save(&challengers, &pushed_off)?;
+        let kept = &self.cache.matches;
+        self.cache.seeds.retain(|k, _| kept.contains_key(k));
+        self.save(&challengers, &pushed_off, draw)?;
         Ok(ChallengeReport {
             rules: self.rules.clone(),
+            seed: draw,
             challengers,
             pushed_off,
             played,
             standings: self.standings()?,
+            stats: Stats {
+                instructions,
+                seconds: t0.elapsed().as_secs_f64(),
+            },
+        })
+    }
+
+    /// The members replayed on placements nobody knew: each pair plays `runs`
+    /// matches, run k placed by `recount_seed(text, a, b, k)`, and the table
+    /// comes from those matches alone (points and tie rule as on the hill).
+    /// For a final table after a freeze, `text` from a value published after
+    /// it. Changes nothing.
+    pub fn recount(&self, text: &str, runs: u32, threads: usize) -> Result<RecountReport> {
+        let t0 = std::time::Instant::now();
+        if text.is_empty() {
+            return Err("the seed text is empty".into());
+        }
+        if runs == 0 {
+            return Err("--runs: at least 1".into());
+        }
+        let cfg = self.rules.config();
+        let second = Config {
+            first_warrior: false,
+            ..cfg
+        };
+        let ms = &self.state.members;
+        let mut compiled: HashMap<&str, (Compiled, Compiled)> = HashMap::new();
+        for m in ms {
+            let path = self.source_path(&m.id);
+            let src = read_source(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+            if warrior_id(&src) != m.id {
+                return Err(format!(
+                    "{}: the text does not hash to its id",
+                    path.display()
+                ));
+            }
+            let w1 = assemble(&src, &cfg).map_err(|e| format!("{}: {}", m.id, e))?;
+            let w2 = assemble(&src, &second).map_err(|e| format!("{}: {}", m.id, e))?;
+            compiled.insert(&m.id, (Compiled::new(&w1), Compiled::new(&w2)));
+        }
+        let positions = cfg.core_size + 1 - 2 * cfg.min_distance;
+        let mut planned = Vec::new();
+        for (i, x) in ms.iter().enumerate() {
+            for y in &ms[i + 1..] {
+                let (a, b, _) = pairing(&x.id, &y.id);
+                for k in 0..runs {
+                    planned.push((a, b, k, recount_seed(text, a, b, k, positions)));
+                }
+            }
+        }
+        let jobs: Vec<Job> = planned
+            .iter()
+            .map(|(a, b, _, s)| Job {
+                a: &compiled[a].0,
+                b: &compiled[b].1,
+                seed: *s as i32,
+            })
+            .collect();
+        let (scores, instructions) = pool::play_all(&cfg, &jobs, cfg.rounds, threads);
+        let p = self.rules.points;
+        let mut rows: Vec<(Standing, u64)> = ms
+            .iter()
+            .map(|m| {
+                (
+                    Standing {
+                        place: 0,
+                        id: m.id.clone(),
+                        name: m.name.clone(),
+                        author: m.author.clone(),
+                        score: 0,
+                        wins: 0,
+                        ties: 0,
+                        losses: 0,
+                        age: m.age,
+                    },
+                    m.arrived,
+                )
+            })
+            .collect();
+        let index: HashMap<&str, usize> = ms
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.id.as_str(), i))
+            .collect();
+        let mut matches = Vec::with_capacity(planned.len());
+        for ((a, b, k, s), r) in planned.into_iter().zip(scores) {
+            for (who, won, lost) in [(a, r.w1, r.w2), (b, r.w2, r.w1)] {
+                let row = &mut rows[index[who]].0;
+                row.wins += won;
+                row.losses += lost;
+                row.ties += r.ties;
+                row.score += p.win * won as i64 + p.tie * r.ties as i64 + p.loss * lost as i64;
+            }
+            matches.push(Recounted {
+                a: a.to_owned(),
+                b: b.to_owned(),
+                run: k,
+                seed: s,
+                result: r,
+            });
+        }
+        let older = self.rules.tie_break == TieBreak::Older;
+        rows.sort_by(|(x, ax), (y, ay)| {
+            y.score
+                .cmp(&x.score)
+                .then(if older { ax.cmp(ay) } else { ay.cmp(ax) })
+        });
+        let standings = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, (mut r, _))| {
+                r.place = i + 1;
+                r
+            })
+            .collect();
+        Ok(RecountReport {
+            rules: self.rules.clone(),
+            seed: text.to_owned(),
+            runs,
+            matches,
+            standings,
             stats: Stats {
                 instructions,
                 seconds: t0.elapsed().as_secs_f64(),
@@ -670,11 +916,21 @@ impl Hill {
                         continue;
                     };
                     expected.insert(key.clone());
+                    let placed = match self.rules.placement {
+                        Placement::Hash => seed(a, b, positions),
+                        Placement::Random => match self.cache.seeds.get(&key) {
+                            Some(x) => *x,
+                            None => {
+                                problem("results", format!("no seed for {}", key));
+                                continue;
+                            }
+                        },
+                    };
                     if let (Some(ca), Some(cb)) = (compiled.get(a), compiled.get(b)) {
                         jobs.push(Job {
                             a: &ca.0,
                             b: &cb.1,
-                            seed: seed(a, b, positions) as i32,
+                            seed: placed as i32,
                         });
                         stored.push((key, *s));
                     }
@@ -829,7 +1085,12 @@ impl Hill {
         self.records()
     }
 
-    fn save(&self, challengers: &[Challenger], pushed_off: &[Gone]) -> Result<()> {
+    fn save(
+        &self,
+        challengers: &[Challenger],
+        pushed_off: &[Gone],
+        seed: Option<u64>,
+    ) -> Result<()> {
         write_atomic(&self.dir.join("results.json"), &to_json(&self.cache))?;
         write_atomic(&self.dir.join("state.json"), &to_json(&self.state))?;
         if challengers.is_empty() && pushed_off.is_empty() {
@@ -838,6 +1099,8 @@ impl Hill {
         #[derive(Serialize)]
         struct Line<'a> {
             time: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            seed: Option<u64>,
             challengers: &'a [Challenger],
             pushed_off: &'a [Gone],
         }
@@ -846,6 +1109,7 @@ impl Hill {
             .map_or(0, |d| d.as_secs());
         let line = serde_json::to_string(&Line {
             time,
+            seed,
             challengers,
             pushed_off,
         })
