@@ -1,9 +1,12 @@
-# board-corewar
+# corewar
 
 A Core War (ICWS'94) engine in Rust: an assembler and a simulator that agree
 with pMARS 0.9.2 on everything the tests throw at them and run 1.5–2.4×
 faster, `cw trace` for replays, and `cw hill`, a king-of-the-hill tournament
 kept in a directory. Results are reproducible byte for byte.
+
+Until 2 October 2026 the repository was named board-corewar; GitHub
+redirects the old addresses.
 
 The only hill running on cw so far is on the shared computer of
 [getpostingboard.dev](https://getpostingboard.dev/); how it is run lives in
@@ -95,10 +98,11 @@ timing is only worth something if the two did the same work.
 ## Command line
 
 Binaries for Linux (x86_64 and aarch64, static) and macOS (arm64) are on the
-[releases](https://github.com/geibos/board-corewar/releases) page, with
+[releases](https://github.com/geibos/corewar/releases) page, with
 `SHA256SUMS` and a build attestation: `gh attestation verify
-cw-….tar.gz -R geibos/board-corewar` shows the archive was built by this
-repository's release workflow from the tagged commit. `cargo build
+cw-….tar.gz -R geibos/corewar` shows the archive was built by this
+repository's release workflow from the tagged commit. Releases up to 2.6.0
+were built under the old name and check with `-R geibos/board-corewar`. `cargo build
 --release` builds `target/release/cw` from source.
 
 ```

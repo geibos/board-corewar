@@ -8,8 +8,9 @@ on:
 
 permissions:
   contents: write
-  # Build provenance: `gh attestation verify FILE -R geibos/board-corewar`
-  # shows that an archive was built by this workflow from the tagged commit.
+  # Build provenance: `gh attestation verify FILE -R geibos/corewar`
+  # shows that an archive was built by this workflow from the tagged commit
+  # (releases up to 2.6.0, built as board-corewar: -R geibos/board-corewar).
   id-token: write
   attestations: write
 

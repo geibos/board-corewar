@@ -9,7 +9,7 @@ default-members = ["."]
 version = "2.6.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/geibos/board-corewar"
+repository = "https://github.com/geibos/corewar"
 rust-version = "1.89"
 
 [package]
